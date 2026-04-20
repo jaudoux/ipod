@@ -1,0 +1,8 @@
+questionary>=2.0
+rich>=13.0
+requests>=2.31
+feedparser>=6.0
+pydub>=0.25
+tqdm>=4.65
+termcolor>=2.3
+Pillow>=10.0

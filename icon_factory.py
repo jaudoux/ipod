@@ -18,7 +18,6 @@ import time
 import unicodedata
 
 import requests
-from termcolor import colored
 
 try:
     from PIL import Image
@@ -27,6 +26,7 @@ try:
 except ImportError:
     _HAS_PIL = False
 
+import tui
 import yoto_api
 
 
@@ -351,12 +351,12 @@ def _load_yoto_public_icons() -> list[dict]:
             timeout=15,
         )
     except requests.RequestException as e:
-        print(colored(f"Could not fetch Yoto icon library: {e}", "yellow"))
+        tui.status("warn", f"Could not fetch Yoto icon library: {e}")
         _yoto_icon_library = []
         return _yoto_icon_library
 
     if response.status_code != 200:
-        print(colored(f"Yoto icon library fetch failed: {response.status_code}", "yellow"))
+        tui.status("warn", f"Yoto icon library fetch failed: {response.status_code}")
         _yoto_icon_library = []
         return _yoto_icon_library
 
@@ -365,7 +365,7 @@ def _load_yoto_public_icons() -> list[dict]:
     try:
         with open(YOTO_PUBLIC_ICONS_CACHE, "w", encoding="utf-8") as f:
             json.dump(icons, f)
-        print(colored(f"Cached {len(icons)} Yoto public icons.", "cyan"))
+        tui.status("info", f"Cached {len(icons)} Yoto public icons.")
     except OSError:
         pass
     return _yoto_icon_library
@@ -554,7 +554,7 @@ def _pixelize_to_tempfile(image_bytes: bytes) -> str | None:
         temp.close()
         return temp.name
     except Exception as e:
-        print(colored(f"  Pixelize failed: {e}", "yellow"))
+        tui.status("warn", f"Pixelize failed: {e}")
         return None
 
 
@@ -614,7 +614,7 @@ def save_cache(podcast_dir: str | None, cache: dict) -> None:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(cache, f, ensure_ascii=False, indent=2)
     except OSError as e:
-        print(colored(f"Warning: could not save icon cache: {e}", "yellow"))
+        tui.status("warn", f"Could not save icon cache: {e}")
 
 
 def generate_icon_ref(
@@ -636,7 +636,7 @@ def generate_icon_ref(
 
     keywords = extract_keywords(title)
     if not keywords:
-        print(colored(f"  No keywords extracted from: {title!r}", "yellow"))
+        tui.status("warn", f"No keywords extracted from: {title!r}")
         return None
 
     # First pass: prefer native Yoto pixel icons (no upload, native 16x16).
@@ -647,12 +647,9 @@ def generate_icon_ref(
         icon, matched_kw = match
         icon_ref = f"yoto:#{icon['mediaId']}"
         cache[title] = icon_ref
-        print(
-            colored(
-                f"  Icon: {title!r} → Yoto «{icon.get('title') or '?'}» "
-                f"(via {matched_kw!r}) ({icon_ref})",
-                "green",
-            )
+        tui.CONSOLE.print(
+            f"  [green]●[/] {title} [dim]→[/] Yoto «{icon.get('title') or '?'}» "
+            f"[dim](via {matched_kw!r})[/]"
         )
         return icon_ref
 
@@ -662,11 +659,8 @@ def generate_icon_ref(
         if web:
             icon_ref, source_title = web
             cache[title] = icon_ref
-            print(
-                colored(
-                    f"  Icon: {title!r} → Web «{source_title}» ({icon_ref})",
-                    "green",
-                )
+            tui.CONSOLE.print(
+                f"  [green]●[/] {title} [dim]→[/] Web «{source_title}»"
             )
             return icon_ref
 
@@ -702,15 +696,12 @@ def generate_icon_ref(
 
         icon_ref = f"yoto:#{media_id}"
         cache[title] = icon_ref
-        print(
-            colored(
-                f"  Icon: {title!r} → Iconify «{icon['name']}» ({icon_ref})",
-                "green",
-            )
+        tui.CONSOLE.print(
+            f"  [green]●[/] {title} [dim]→[/] Iconify «{icon['name']}»"
         )
         return icon_ref
 
-    print(colored(f"  No icon match for: {title!r}", "yellow"))
+    tui.status("warn", f"No icon match for: {title!r}")
     return None
 
 
@@ -746,24 +737,22 @@ def backfill_playlist_icons(
 
     playlist = yoto_api.get_playlist_details(playlist_id)
     if not playlist:
-        print(colored("Could not fetch playlist.", "red"))
+        tui.status("err", "Could not fetch playlist.")
         return stats
 
     chapters = (playlist.get("content") or {}).get("chapters") or []
     stats["total"] = len(chapters)
     if not chapters:
-        print(colored("Playlist has no chapters.", "yellow"))
+        tui.status("warn", "Playlist has no chapters.")
         return stats
 
     cache = load_cache(podcast_dir)
     changed = False
 
     mode = "force regenerate" if force else "backfill"
-    print(
-        colored(
-            f"Scanning {len(chapters)} chapter(s) in playlist {playlist_id} ({mode})...",
-            "cyan",
-        )
+    tui.status(
+        "info",
+        f"Scanning {len(chapters)} chapter(s) in playlist {playlist_id} ({mode})…",
     )
 
     for i, chapter in enumerate(chapters, 1):
@@ -774,14 +763,14 @@ def backfill_playlist_icons(
         track_needs = any(_needs_icon(t.get("display")) for t in tracks)
         if not force and not _needs_icon(display) and not track_needs:
             stats["skipped"] += 1
-            print(colored(f"  [{i}/{len(chapters)}] {title!r} — already custom", "cyan"))
+            tui.CONSOLE.print(f"  [dim][{i}/{len(chapters)}][/] {title} [dim]— already custom[/]")
             continue
 
         if not title:
             stats["failed"] += 1
             continue
 
-        print(colored(f"  [{i}/{len(chapters)}] Generating for {title!r}...", "cyan"))
+        tui.CONSOLE.print(f"  [cyan][{i}/{len(chapters)}][/] generating for [bold]{title}[/]…")
         icon_ref = generate_icon_ref(title, cache, force=force)
         if not icon_ref:
             stats["failed"] += 1
@@ -795,14 +784,14 @@ def backfill_playlist_icons(
         save_cache(podcast_dir, cache)
 
     if not changed:
-        print(colored("No changes to push.", "yellow"))
+        tui.status("warn", "No changes to push.")
         return stats
 
-    print(colored(f"Pushing update to Yoto ({stats['updated']} chapter(s))...", "cyan"))
+    tui.status("info", f"Pushing update to Yoto ({stats['updated']} chapter(s))…")
     if _post_playlist_update(playlist_id, playlist):
-        print(colored("Playlist updated successfully.", "green"))
+        tui.status("ok", "Playlist updated successfully.")
     else:
-        print(colored("Failed to update playlist.", "red"))
+        tui.status("err", "Failed to update playlist.")
         # Keep the cache: icons were uploaded, we can retry the POST later.
 
     return stats
@@ -830,10 +819,10 @@ def _post_playlist_update(playlist_id: str, playlist: dict) -> bool:
             json=payload,
         )
     except requests.RequestException as e:
-        print(colored(f"Network error updating playlist: {e}", "red"))
+        tui.status("err", f"Network error updating playlist: {e}")
         return False
 
     if response.status_code in (200, 201, 204):
         return True
-    print(colored(f"Update failed: {response.status_code} {response.text}", "red"))
+    tui.status("err", f"Update failed: {response.status_code} {response.text}")
     return False

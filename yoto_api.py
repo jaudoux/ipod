@@ -181,43 +181,41 @@ def get_valid_token():
 
 def authenticate_yoto():
     """Authenticate with Yoto using device flow."""
-    print(colored("\nStarting Yoto authentication...", "cyan"))
+    import tui  # local import to avoid circular imports during module init
 
-    # Get client ID from config or prompt user
+    tui.rule("Yoto authentication")
+
     config = load_config()
     client_id = config.get("client_id") if config else None
 
     if not client_id:
-        print(colored("\nYou need a Yoto Developer Client ID to continue.", "yellow"))
-        print(
-            colored(
-                "Please register at https://dashboard.yoto.dev/ to get one.", "yellow"
-            )
+        tui.panel(
+            "Yoto client ID required",
+            "Register at [bold]https://dashboard.yoto.dev/[/] and create a "
+            "[bold]Public Client[/] application to get your client ID.",
+            style="yellow",
         )
-        print("\nAfter registering, create a new application and get your client ID.")
-        print("Make sure to create a 'Public Client' type application.")
-
-        client_id = input(colored("\nEnter your Yoto Client ID: ", "cyan")).strip()
-
+        client_id = tui.text(
+            "Enter your Yoto Client ID",
+            validate=lambda s: bool(s.strip()) or "Client ID required",
+        )
         if not client_id:
-            print(colored("No client ID provided. Authentication canceled.", "red"))
+            tui.status("err", "No client ID provided. Authentication canceled.")
             return None
-
-        # Save the client ID for future use
+        client_id = client_id.strip()
         save_config(client_id)
 
-    # Step 1: Initialize the device login process
     try:
-        print(colored("Initializing device login...", "cyan"))
-        response = requests.post(
-            YOTO_AUTH_URL,
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-            data={
-                "client_id": client_id,
-                "scope": "profile offline_access",
-                "audience": "https://api.yotoplay.com",
-            },
-        )
+        with tui.CONSOLE.status("[cyan]Initializing device login…", spinner="dots"):
+            response = requests.post(
+                YOTO_AUTH_URL,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                data={
+                    "client_id": client_id,
+                    "scope": "profile offline_access",
+                    "audience": "https://api.yotoplay.com",
+                },
+            )
 
         if response.status_code != 200:
             error_msg = "Unknown error"
@@ -226,39 +224,22 @@ def authenticate_yoto():
                 error_msg = error_data.get(
                     "error_description", error_data.get("error", "Unknown error")
                 )
-            except:
+            except Exception:
                 error_msg = response.text
-
-            print(colored(f"\nFailed to initialize device login: {error_msg}", "red"))
+            tui.status("err", f"Failed to initialize device login: {error_msg}")
 
             if "unauthorized_client" in response.text:
-                print(
-                    colored(
-                        "\nThe client ID you provided is not valid or not authorized.",
-                        "red",
-                    )
+                tui.panel(
+                    "Invalid client ID",
+                    "The client ID you provided is not valid or not authorized.\n"
+                    "Make sure you registered at https://dashboard.yoto.dev/, "
+                    "created a Public Client application, and copied the ID correctly.",
+                    style="red",
                 )
-                print("Please make sure:")
-                print("1. You've registered at https://dashboard.yoto.dev/")
-                print("2. You've created a 'Public Client' type application")
-                print("3. You've copied the client ID correctly")
-
-                retry = (
-                    input(
-                        colored(
-                            "\nWould you like to enter a different client ID? (y/n): ",
-                            "cyan",
-                        )
-                    )
-                    .strip()
-                    .lower()
-                )
-                if retry == "y":
-                    # Remove the config file to force re-prompting
+                if tui.confirm("Enter a different client ID?", default=True):
                     if os.path.exists(CONFIG_FILE):
                         os.remove(CONFIG_FILE)
                     return authenticate_yoto()
-
             return None
 
         auth_data = response.json()
@@ -269,50 +250,22 @@ def authenticate_yoto():
         interval = auth_data.get("interval", 5)
         expires_in = auth_data.get("expires_in", 300)
 
-        # Step 2: Display login instructions
-        print("\n" + "=" * 50)
-        print(
-            colored(
-                "To authorize this app with your Yoto account:", "cyan", attrs=["bold"]
-            )
+        tui.auth_device_panel(
+            user_code, verification_uri, verification_uri_complete, expires_in
         )
-        print(f"1. Visit: {colored(verification_uri, 'green')}")
-        print(f"2. Enter code: {colored(user_code, 'yellow', attrs=['bold'])}")
-        print("OR")
-        print(
-            f"3. Open this URL directly: {colored(verification_uri_complete, 'green')}"
-        )
-        print("=" * 50)
-        print(
-            "\nThis code will expire in",
-            colored(f"{expires_in//60} minutes", "yellow"),
-            "if not used.",
-        )
-        print("\nWaiting for you to complete the authorization in your browser...")
-        print(
-            "\nNote: If you're not already logged in to Yoto, you'll need to sign in first."
-        )
-        print("=" * 50 + "\n")
 
-        # Try to open the browser automatically
         try:
             webbrowser.open(verification_uri_complete)
-            print("Browser opened automatically. Please complete the authorization.")
-        except:
-            print("Could not open browser automatically. Please use the URL above.")
+            tui.status("info", "Opened browser automatically.")
+        except Exception:
+            tui.status("warn", "Could not open browser automatically — use the URL above.")
 
-        # Step 3: Poll for the access token
-        print("Waiting for authorization...")
-        interval_ms = interval * 1000
         start_time = time.time()
-
-        with tqdm(total=expires_in, desc="Authorization timeout", unit="s") as pbar:
+        with tui.progress("Waiting for authorization") as prog:
+            task = prog.add_task("Waiting for authorization", total=expires_in)
             while time.time() - start_time < expires_in:
-                # Update progress bar
-                pbar.n = int(time.time() - start_time)
-                pbar.refresh()
+                prog.update(task, completed=int(time.time() - start_time))
 
-                # Poll for token
                 token_response = requests.post(
                     YOTO_TOKEN_URL,
                     headers={"Content-Type": "application/x-www-form-urlencoded"},
@@ -328,45 +281,41 @@ def authenticate_yoto():
                     token_data = token_response.json()
                     access_token = token_data.get("access_token")
                     refresh_token = token_data.get("refresh_token")
-
                     if access_token and refresh_token:
-                        # Clean tokens before saving
                         access_token = access_token.strip()
                         refresh_token = refresh_token.strip()
                         save_tokens(access_token, refresh_token)
-                        pbar.close()
-                        print(colored("\nAuthorization successful!", "green"))
+                        prog.update(task, completed=expires_in)
+                        tui.status("ok", "Authorization successful!")
                         return access_token
 
-                # Handle errors
                 if token_response.status_code == 403:
                     error_data = token_response.json()
                     error = error_data.get("error")
-
                     if error == "authorization_pending":
-                        # User hasn't completed authorization yet
                         time.sleep(interval)
                         continue
                     elif error == "slow_down":
-                        # Increase polling interval
                         interval += 5
-                        print("Received slow_down, increasing interval...")
+                        tui.status("warn", "slow_down received — backing off.")
                         time.sleep(interval)
                         continue
                     elif error == "expired_token":
-                        print("Device code has expired. Please try again.")
+                        tui.status("err", "Device code expired. Please try again.")
                         return None
                     else:
-                        print(f"Error: {error_data.get('error_description', error)}")
+                        tui.status(
+                            "err", f"{error}: {error_data.get('error_description', '')}"
+                        )
                         return None
 
                 time.sleep(interval)
 
-        print("Authorization timed out. Please try again.")
+        tui.status("err", "Authorization timed out. Please try again.")
         return None
 
     except Exception as e:
-        print(f"Authentication error: {e}")
+        tui.status("err", f"Authentication error: {e}")
         return None
 
 
@@ -1453,189 +1402,126 @@ def display_icon_preview(icons):
 
 def icon_upload_menu():
     """Interactive menu for searching and uploading custom icons to Yoto."""
-    print("\n" + colored("=" * 50, "magenta"))
-    print(colored(" CUSTOM ICON UPLOAD ", "magenta", attrs=["bold"]))
-    print(colored("=" * 50, "magenta"))
+    import tui
 
-    # Check authentication
+    tui.rule("Custom icon upload")
+
     access_token = get_valid_token()
     if not access_token:
-        print(colored("\nYou need to authenticate with Yoto first.", "yellow"))
         access_token = authenticate_yoto()
         if not access_token:
-            print(colored("Authentication failed.", "red"))
+            tui.status("err", "Authentication failed.")
             return None
 
     while True:
-        print("\n" + colored("Icon Upload Options:", "cyan"))
-        print(f"[{colored('1', 'green')}] Search and upload icon from Iconify")
-        print(f"[{colored('2', 'green')}] Upload icon from local file")
-        print(f"[{colored('B', 'yellow')}] Back")
-
-        choice = input(colored("\nSelect an option: ", "white")).strip().lower()
-
-        if choice == "b":
+        choice = tui.select(
+            "Icon source",
+            [
+                tui.Choice(title="🔎  Search Iconify (colored emoji icons)", value="search"),
+                tui.Choice(title="📁  Upload from a local file", value="file"),
+                tui.Separator(),
+                tui.Choice(title="← Back", value="back"),
+            ],
+        )
+        if choice in (None, "back"):
             return None
 
-        elif choice == "1":
-            # Search for icons
-            query = input(
-                colored(
-                    "\nEnter search keywords (e.g., 'book', 'music', 'star'): ", "white"
-                )
-            ).strip()
-
-            if not query:
-                print(colored("No search query provided.", "yellow"))
-                continue
-
-            print(colored(f"\nSearching for '{query}'...", "cyan"))
-            icons = search_icons(query, limit=3)
-
-            if not icons:
-                print(colored("No icons found. Try different keywords.", "yellow"))
-                continue
-
-            # Display results
-            display_icon_preview(icons)
-
-            # Let user select
-            print(f"\n[{colored('P', 'yellow')}] Preview icons in browser")
-            selection = (
-                input(
-                    colored(
-                        "\nSelect icon number (or P to preview, B to go back): ",
-                        "white",
-                    )
-                )
-                .strip()
-                .lower()
-            )
-
-            if selection == "b":
-                continue
-            elif selection == "p":
-                # Open preview URLs in browser
-                for icon in icons:
-                    preview_url = f"{icon['svg_url']}?width=128"
-                    print(colored(f"Opening: {preview_url}", "cyan"))
-                    webbrowser.open(preview_url)
-
-                # Ask again after preview
-                selection = (
-                    input(
-                        colored("\nNow select icon number (or B to go back): ", "white")
-                    )
-                    .strip()
-                    .lower()
-                )
-                if selection == "b":
-                    continue
-
-            try:
-                idx = int(selection)
-                if 0 <= idx < len(icons):
-                    selected_icon = icons[idx]
-                    print(colored(f"\nSelected: {selected_icon['name']}", "green"))
-
-                    # Download and upload the icon
-                    print(colored("Downloading icon...", "cyan"))
-                    icon_bytes, temp_path = download_icon_as_png(selected_icon, size=16)
-
-                    if temp_path:
-                        # Upload to Yoto
-                        result = upload_custom_icon(
-                            file_path=temp_path,
-                            filename=f"{selected_icon['icon']}.png",
-                            auto_convert=True,
-                        )
-
-                        # Clean up temp file
-                        try:
-                            os.unlink(temp_path)
-                        except:
-                            pass
-
-                        if result:
-                            media_id = result.get("mediaId")
-                            if media_id:
-                                print(
-                                    colored(
-                                        f"\nYour icon reference: yoto:#{media_id}",
-                                        "green",
-                                        attrs=["bold"],
-                                    )
-                                )
-                                print(
-                                    colored(
-                                        "You can use this reference in your playlists!",
-                                        "cyan",
-                                    )
-                                )
-                            return result
-                    else:
-                        print(colored("Failed to download icon.", "red"))
-                else:
-                    print(colored("Invalid selection.", "red"))
-            except ValueError:
-                print(colored("Please enter a valid number.", "red"))
-
-        elif choice == "2":
-            # Upload from local file
-            file_path = input(colored("\nEnter path to image file: ", "white")).strip()
-
-            if not file_path:
-                print(colored("No file path provided.", "yellow"))
-                continue
-
-            # Expand user path
-            file_path = os.path.expanduser(file_path)
-
-            if not os.path.exists(file_path):
-                print(colored(f"File not found: {file_path}", "red"))
-                continue
-
-            # Check file extension
-            valid_extensions = [".png", ".jpg", ".jpeg", ".gif", ".svg"]
-            ext = os.path.splitext(file_path)[1].lower()
-            if ext not in valid_extensions:
-                print(
-                    colored(
-                        f"Invalid file type. Supported: {', '.join(valid_extensions)}",
-                        "red",
-                    )
-                )
-                continue
-
-            # Ask about auto-convert
-            auto_convert = (
-                input(colored("Auto-convert to 16x16? (Y/n): ", "white"))
-                .strip()
-                .lower()
-                != "n"
-            )
-
-            # Upload
-            result = upload_custom_icon(file_path=file_path, auto_convert=auto_convert)
-
-            if result:
-                media_id = result.get("mediaId")
-                if media_id:
-                    print(
-                        colored(
-                            f"\nYour icon reference: yoto:#{media_id}",
-                            "green",
-                            attrs=["bold"],
-                        )
-                    )
-                    print(
-                        colored("You can use this reference in your playlists!", "cyan")
-                    )
+        if choice == "search":
+            result = _icon_search_flow()
+            if result is not None:
                 return result
+            continue
 
-        else:
-            print(colored("Invalid option.", "red"))
+        if choice == "file":
+            result = _icon_file_flow()
+            if result is not None:
+                return result
+            continue
 
+
+def _icon_search_flow():
+    """Iconify search → pick → optional browser preview → upload."""
+    import tui
+
+    query = tui.text(
+        "Search keywords (e.g. book, music, star)",
+        validate=lambda s: bool(s.strip()) or "Query required",
+    )
+    if not query:
+        return None
+
+    with tui.CONSOLE.status(f"[cyan]Searching Iconify for '{query}'…", spinner="dots"):
+        icons = search_icons(query.strip(), limit=5)
+    if not icons:
+        tui.status("warn", "No icons found. Try different keywords.")
+        return None
+
+    _PREVIEW = "__preview__"
+    while True:
+        picked = tui.select(
+            "Pick an icon (or preview all in a browser)",
+            [
+                *[tui.Choice(title=icon["name"], value=icon) for icon in icons],
+                tui.Separator(),
+                tui.Choice(title="🌐  Preview all in browser", value=_PREVIEW),
+                tui.Choice(title="← Back", value=None),
+            ],
+        )
+        if picked is None:
+            return None
+        if picked == _PREVIEW:
+            for icon in icons:
+                webbrowser.open(f"{icon['svg_url']}?width=128")
+            continue
+
+        tui.status("info", f"Selected: {picked['name']}")
+        _png_bytes, temp_path = download_icon_as_png(picked, size=16)
+        if not temp_path:
+            tui.status("err", "Failed to download icon.")
+            return None
+        try:
+            result = upload_custom_icon(
+                file_path=temp_path,
+                filename=f"{picked['icon']}.png",
+                auto_convert=True,
+            )
+        finally:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
+
+        if result and result.get("mediaId"):
+            tui.status("ok", f"Icon reference: yoto:#{result['mediaId']}")
+            return result
+        return None
+
+
+def _icon_file_flow():
+    """Local file picker → validate → upload."""
+    import tui
+
+    file_path = tui.path("Path to image file")
+    if not file_path:
+        return None
+    file_path = os.path.expanduser(file_path.strip())
+
+    if not os.path.exists(file_path):
+        tui.status("err", f"File not found: {file_path}")
+        return None
+
+    valid_exts = [".png", ".jpg", ".jpeg", ".gif", ".svg"]
+    ext = os.path.splitext(file_path)[1].lower()
+    if ext not in valid_exts:
+        tui.status("err", f"Invalid file type. Supported: {', '.join(valid_exts)}")
+        return None
+
+    auto_convert = bool(tui.confirm("Auto-convert to 16×16?", default=True))
+
+    result = upload_custom_icon(file_path=file_path, auto_convert=auto_convert)
+    if result and result.get("mediaId"):
+        tui.status("ok", f"Icon reference: yoto:#{result['mediaId']}")
+        return result
     return None
 
 
@@ -1711,6 +1597,29 @@ def create_playlist(title, description=None):
         return None
 
 
+def _pick_playlist(message="Select a playlist", include_none=False):
+    """Arrow-key playlist picker. Returns playlist_id, or None when the user
+    cancels / no playlists. When include_none is True adds a "No playlist"
+    choice that returns the sentinel string ``"__none__"``.
+    """
+    import tui
+
+    playlists = get_yoto_playlists()
+    if not playlists:
+        tui.status("err", "Could not retrieve playlists.")
+        return None
+
+    choices = []
+    if include_none:
+        choices.append(tui.Choice(title="(no playlist — upload only)", value="__none__"))
+    for pl in playlists:
+        title = pl.get("title") or "?"
+        pl_id = pl.get("id") or "?"
+        choices.append(tui.Choice(title=f"{title}  [dim]{pl_id}[/]", value=pl_id))
+
+    return tui.select(message, choices)
+
+
 def yoto_menu(podcast_dir, episode_title=None, mp3_path=None, downloaded_episodes=None):
     """Display Yoto integration menu.
 
@@ -1721,35 +1630,24 @@ def yoto_menu(podcast_dir, episode_title=None, mp3_path=None, downloaded_episode
         downloaded_episodes: Optional list of tuples (title, path) for recently downloaded episodes
     """
 
-    print("\n" + colored("=" * 50, "magenta"))
-    print(colored(" YOTO PLAYER INTEGRATION ", "magenta", attrs=["bold"]))
-    print(colored("=" * 50, "magenta"))
+    import tui  # local import avoids circulars during module init
 
-    # Check if we need to authenticate
+    tui.rule("Yoto player integration")
+
     access_token = get_valid_token()
     if not access_token:
-        print(colored("\nYou need to authenticate with Yoto first.", "yellow"))
-        print(colored("\nTo use the Yoto API, you need to:", "cyan"))
-        print("1. Register at https://dashboard.yoto.dev/")
-        print("2. Create a new application (Public Client type)")
-        print("3. Copy your client ID")
-        print("\nYou'll be prompted to enter your client ID in the next step.")
-
-        proceed = (
-            input(colored("\nReady to continue with authentication? (y/n): ", "cyan"))
-            .strip()
-            .lower()
+        tui.panel(
+            "Yoto authentication required",
+            "Register at [bold]https://dashboard.yoto.dev/[/], create a "
+            "Public Client application, and copy the client ID.",
+            style="yellow",
         )
-        if proceed != "y":
-            print(colored("Authentication canceled. Returning to main menu.", "yellow"))
+        if not tui.confirm("Ready to continue with authentication?", default=True):
+            tui.status("warn", "Authentication canceled. Returning to main menu.")
             return
-
         access_token = authenticate_yoto()
         if not access_token:
-            print(colored("\nAuthentication failed.", "red"))
-            print("Please make sure you've registered at https://dashboard.yoto.dev/")
-            print("and created a Public Client type application.")
-            print("\nReturning to main menu.")
+            tui.status("err", "Authentication failed. Returning to main menu.")
             return
 
     # Find all downloaded episodes
@@ -1768,463 +1666,232 @@ def yoto_menu(podcast_dir, episode_title=None, mp3_path=None, downloaded_episode
                         )
         return episodes
 
-    # Select an episode from the list
     def select_episode(episodes, playlist=None, multi_select=False):
-        """Let user select one or more episodes from the list.
+        """Arrow/space/enter episode picker.
 
-        Args:
-            episodes: List of episodes to select from
-            playlist: Optional playlist to check if episodes are already in it
-            multi_select: Whether to allow multiple episode selection
-
-        Returns:
-            If multi_select is True: List of tuples (path, title) for selected episodes
-            If multi_select is False: Tuple of (path, title) for selected episode or (None, None)
+        Returns a list of (path, title) tuples when multi_select=True,
+        otherwise a single (path, title) tuple or (None, None) on cancel.
         """
         if not episodes:
-            print(colored("\nNo downloaded episodes found.", "yellow"))
+            tui.status("warn", "No downloaded episodes found.")
             return [] if multi_select else (None, None)
 
-        if multi_select:
-            print("\n" + colored("Select episode(s):", "cyan"))
-            print(
-                colored(
-                    "Enter multiple numbers separated by spaces (e.g., '0 2 5') to select multiple episodes",
-                    "yellow",
-                )
-            )
-        else:
-            print("\n" + colored("Select an episode to upload:", "cyan"))
-
-        # Display episodes with indicators if they're already in the playlist
-        for i, episode in enumerate(episodes):
-            title_display = episode["title"]
-
-            # Check if this episode is already in the playlist
-            # Only check if playlist is provided and has a valid structure
-            is_in_playlist = False
+        choices = []
+        for ep in episodes:
+            title = ep["title"]
+            in_pl = False
             if playlist:
                 try:
-                    is_in_playlist = is_episode_in_playlist(episode["title"], playlist)
-                except Exception as e:
-                    # Silently handle any errors in checking playlist
+                    in_pl = is_episode_in_playlist(title, playlist)
+                except Exception:
                     pass
-
-            if is_in_playlist:
-                print(
-                    f"[{colored(i, 'green')}] {title_display} {colored('(Already in playlist)', 'magenta')}"
+            choices.append(
+                tui.episode_choice(
+                    title,
+                    synced=in_pl,
+                    has_local=True,
+                    card_linked=bool(playlist),
+                    value=(ep["path"], ep["title"]),
                 )
-            else:
-                print(f"[{colored(i, 'green')}] {title_display}")
+            )
 
-        try:
-            if multi_select:
-                selection = input(colored("\nEnter episode number(s): ", "white"))
-                indices = [int(idx.strip()) for idx in selection.split()]
-
-                selected_episodes = []
-                for idx in indices:
-                    if 0 <= idx < len(episodes):
-                        selected = episodes[idx]
-                        selected_episodes.append((selected["path"], selected["title"]))
-                    else:
-                        print(colored(f"Invalid selection: {idx}", "red"))
-
-                if not selected_episodes:
-                    print(colored("No valid episodes selected.", "red"))
-                    return []
-
-                return selected_episodes
-            else:
-                episode_idx = int(input(colored("\nEnter episode number: ", "white")))
-                if 0 <= episode_idx < len(episodes):
-                    selected = episodes[episode_idx]
-                    return selected["path"], selected["title"]
-                else:
-                    print(colored("Invalid selection.", "red"))
-                    return None, None
-        except ValueError:
-            print(colored("Please enter valid number(s).", "red"))
-            return [] if multi_select else (None, None)
+        if multi_select:
+            picked = tui.checkbox("Select episodes to upload", choices)
+            if not picked:
+                tui.status("info", "No episodes selected.")
+                return []
+            return picked
+        picked = tui.select("Select an episode to upload", choices)
+        if picked is None:
+            return (None, None)
+        return picked
 
     # If downloaded_episodes is provided, directly prompt to upload to a playlist
     if downloaded_episodes:
-        print(
-            colored(f"\n{len(downloaded_episodes)} episode(s) ready to upload:", "cyan")
-        )
-        for title, path in downloaded_episodes:
-            print(f"  - {title}")
+        tui.status("info", f"{len(downloaded_episodes)} episode(s) ready to upload:")
+        for title, _path in downloaded_episodes:
+            tui.CONSOLE.print(f"  • {title}")
 
-        # Get playlists
-        playlists = get_yoto_playlists()
-        if not playlists:
-            print(colored("Could not retrieve playlists.", "red"))
+        playlist_id = _pick_playlist("Select a playlist to upload to")
+        if not playlist_id:
             return
 
-        print("\n" + colored("Select a playlist to upload to:", "cyan"))
-        for i, playlist in enumerate(playlists):
-            print(
-                f"[{colored(i, 'green')}] {playlist.get('title')} (ID: {playlist.get('id')})"
-            )
-
-        try:
-            playlist_idx = int(input(colored("\nEnter playlist number: ", "white")))
-            if 0 <= playlist_idx < len(playlists):
-                selected_playlist = playlists[playlist_idx]
-                playlist_id = selected_playlist.get("id")
-
-                # Upload each episode to the playlist
-                for title, path in downloaded_episodes:
-                    print(colored(f"\nUploading {title}...", "cyan"))
-                    content_id = upload_to_yoto(path, title, playlist_id)
-                    if content_id:
-                        print(
-                            colored(
-                                f"Successfully uploaded {title} to playlist!",
-                                "green",
-                            )
-                        )
-                    else:
-                        print(colored(f"Failed to upload {title}.", "red"))
-
-                print(colored("\nAll episodes processed.", "cyan"))
+        for title, path in downloaded_episodes:
+            tui.status("info", f"Uploading: {title}")
+            content_id = upload_to_yoto(path, title, playlist_id)
+            if content_id:
+                tui.status("ok", f"Uploaded '{title}'.")
             else:
-                print(colored("Invalid playlist selection.", "red"))
-        except ValueError:
-            print(colored("Please enter a valid number.", "red"))
-        return  # Return after processing downloaded episodes
+                tui.status("err", f"Failed to upload '{title}'.")
+        tui.status("ok", "All episodes processed.")
+        return
+
+    _yoto_menu_loop(podcast_dir, episode_title, mp3_path, find_episodes, select_episode)
+
+
+def _yoto_menu_loop(podcast_dir, episode_title, mp3_path, find_episodes, select_episode):
+    import tui
+    import icon_factory
 
     while True:
-        print("\n" + colored("Yoto Options:", "cyan"))
-        print(f"[{colored('1', 'green')}] Upload episode to a playlist")
-        print(f"[{colored('2', 'green')}] Add existing content to playlist")
-        print(f"[{colored('3', 'green')}] Create new playlist")
-        print(f"[{colored('4', 'green')}] View my playlists")
-        print(f"[{colored('5', 'green')}] Upload all downloaded episodes")
-        print(f"[{colored('6', 'green')}] Upload custom icon")
-        print(f"[{colored('7', 'green')}] Backfill icons for a playlist")
-        print(f"[{colored('B', 'yellow')}] Back to main menu")
+        action = tui.select(
+            "Yoto menu",
+            [
+                tui.Choice(title="📤  Upload episode(s) to a playlist", value="upload"),
+                tui.Choice(title="📎  Add existing content to a playlist", value="add"),
+                tui.Choice(title="🆕  Create a new playlist", value="create"),
+                tui.Choice(title="📚  View my playlists", value="view"),
+                tui.Choice(title="📦  Upload all downloaded episodes", value="bulk"),
+                tui.Choice(title="🖼️   Upload a custom icon", value="icon_upload"),
+                tui.Choice(title="✨  Backfill icons for a playlist", value="icon_backfill"),
+                tui.Separator(),
+                tui.Choice(title="← Back to main menu", value="back"),
+            ],
+        )
+        if action in (None, "back"):
+            return
 
-        choice = input(colored("\nSelect an option: ", "white")).strip().lower()
-
-        if choice == "b":
-            break
-
-        elif choice == "6":
-            # Upload custom icon
+        if action == "icon_upload":
             icon_upload_menu()
+            continue
 
-        elif choice == "7":
-            # Backfill icons for a playlist
-            import icon_factory
-
-            playlists = get_yoto_playlists()
-            if not playlists:
-                print(colored("Could not retrieve playlists.", "red"))
+        if action == "icon_backfill":
+            playlist_id = _pick_playlist("Backfill icons for which playlist?")
+            if not playlist_id:
                 continue
-
-            print("\n" + colored("Select a playlist to backfill icons for:", "cyan"))
-            for i, playlist in enumerate(playlists):
-                print(
-                    f"[{colored(i, 'green')}] {playlist.get('title')} (ID: {playlist.get('id')})"
-                )
-
-            try:
-                idx = int(input(colored("\nEnter playlist number: ", "white")))
-                if 0 <= idx < len(playlists):
-                    selected = playlists[idx]
-                    playlist_id = selected.get("id")
-
-                    force = False
-                    full = get_playlist_details(playlist_id)
-                    if full:
-                        existing = icon_factory.count_custom_icons(full)
-                        if existing:
-                            ans = (
-                                input(
-                                    colored(
-                                        f"\n{existing} chapter(s) already have a custom icon. "
-                                        "Regenerate all icons? (y/N): ",
-                                        "magenta",
-                                    )
-                                )
-                                .strip()
-                                .lower()
-                            )
-                            force = ans == "y"
-
-                    stats = icon_factory.backfill_playlist_icons(
-                        playlist_id, force=force
-                    )
-                    print(
-                        colored(
-                            f"\nDone: {stats['updated']} updated, "
-                            f"{stats['skipped']} already custom, "
-                            f"{stats['failed']} failed, of {stats['total']}.",
-                            "cyan",
+            force = False
+            full = get_playlist_details(playlist_id)
+            if full:
+                existing = icon_factory.count_custom_icons(full)
+                if existing:
+                    force = bool(
+                        tui.confirm(
+                            f"{existing} chapter(s) already have a custom icon. "
+                            "Regenerate all icons?",
+                            default=False,
                         )
                     )
-                else:
-                    print(colored("Invalid playlist selection.", "red"))
-            except ValueError:
-                print(colored("Please enter a valid number.", "red"))
+            stats = icon_factory.backfill_playlist_icons(playlist_id, force=force)
+            tui.status(
+                "ok" if stats["updated"] else "info",
+                f"Done: {stats['updated']} updated, {stats['skipped']} already custom, "
+                f"{stats['failed']} failed, of {stats['total']}.",
+            )
+            continue
 
-        elif choice == "1":
-            # Upload episode(s) to a playlist
-            # First, get playlists
-            playlists = get_yoto_playlists()
-            if not playlists:
-                print(colored("Could not retrieve playlists.", "red"))
+        if action == "upload":
+            playlist_id = _pick_playlist("Select a playlist")
+            if not playlist_id:
                 continue
 
-            print("\n" + colored("Select a playlist:", "cyan"))
-            for i, playlist in enumerate(playlists):
-                print(
-                    f"[{colored(i, 'green')}] {playlist.get('title')} (ID: {playlist.get('id')})"
-                )
+            with tui.CONSOLE.status("[cyan]Fetching playlist details…", spinner="dots"):
+                full_playlist = get_playlist_details(playlist_id)
 
-            try:
-                playlist_idx = int(input(colored("\nEnter playlist number: ", "white")))
-                if 0 <= playlist_idx < len(playlists):
-                    selected_playlist = playlists[playlist_idx]
-                    playlist_id = selected_playlist.get("id")
-
-                    # Fetch full playlist details to get chapters for highlighting
-                    print(colored("Fetching playlist details...", "cyan"))
-                    full_playlist = get_playlist_details(playlist_id)
-
-                    # Now select episode(s)
-                    if mp3_path and episode_title:
-                        # Single episode from main flow
-                        selected_episodes = [(mp3_path, episode_title)]
-                    else:
-                        # Select multiple episodes with playlist highlighting
-                        episodes = find_episodes()
-                        selected_episodes = select_episode(
-                            episodes, full_playlist, multi_select=True
-                        )
-
-                        if not selected_episodes:
-                            print(colored("No episodes selected.", "yellow"))
-                            continue
-
-                    # Upload each selected episode to the playlist
-                    for path, title in selected_episodes:
-                        print(colored(f"\nUploading {title}...", "cyan"))
-                        content_id = upload_to_yoto(path, title, playlist_id)
-                        if content_id:
-                            print(
-                                colored(
-                                    f"Successfully uploaded {title} to playlist!",
-                                    "green",
-                                )
-                            )
-                        else:
-                            print(colored(f"Failed to upload {title}.", "red"))
-
-                    print(colored("\nAll selected episodes processed.", "cyan"))
-                else:
-                    print(colored("Invalid playlist selection.", "red"))
-            except ValueError:
-                print(colored("Please enter a valid number.", "red"))
-
-        elif choice == "2":
-            # Add existing content to playlist
-            # First get user's content
-            print(colored("\nFetching your existing Yoto content...", "cyan"))
-            content_items = get_yoto_content()
-            if not content_items:
-                print(
-                    colored(
-                        "Could not retrieve your content due to API permissions.", "red"
-                    )
-                )
-                print(colored("Please enter the content ID manually:", "yellow"))
-                content_id = input(colored("Content ID: ", "white")).strip()
-                content_title = input(colored("Content Title: ", "white")).strip()
-
-                if not content_id:
-                    print(colored("No content ID provided.", "red"))
+            if mp3_path and episode_title:
+                selected_episodes = [(mp3_path, episode_title)]
+            else:
+                episodes = find_episodes()
+                selected_episodes = select_episode(episodes, full_playlist, multi_select=True)
+                if not selected_episodes:
                     continue
 
-            # Display content for selection
-            print("\n" + colored("Select content to add to playlist:", "cyan"))
-            for i, item in enumerate(content_items):
-                print(
-                    f"[{colored(i, 'green')}] {item.get('title')} (ID: {item.get('cardId')})"
-                )
-
-            try:
-                content_idx = int(input(colored("\nEnter content number: ", "white")))
-                if 0 <= content_idx < len(content_items):
-                    selected_content = content_items[content_idx]
-                    content_id = selected_content.get("cardId")
-                    content_title = selected_content.get("title")
-
-                    if not content_id:
-                        print(colored("Invalid content selection.", "red"))
-                        continue
-
-                    # Now get playlists
-                    playlists = get_yoto_playlists()
-                    if not playlists:
-                        print(
-                            colored(
-                                "Could not retrieve playlists due to API permissions.",
-                                "red",
-                            )
-                        )
-                        print(
-                            colored("Please enter the playlist ID manually:", "yellow")
-                        )
-                        playlist_id = input(colored("Playlist ID: ", "white")).strip()
-
-                        if not playlist_id:
-                            print(colored("No playlist ID provided.", "red"))
-                            continue
-                    else:
-                        print("\n" + colored("Select a playlist:", "cyan"))
-                        for i, playlist in enumerate(playlists):
-                            print(f"[{colored(i, 'green')}] {playlist.get('title')}")
-
-                        playlist_idx = int(
-                            input(colored("\nEnter playlist number: ", "white"))
-                        )
-                        if 0 <= playlist_idx < len(playlists):
-                            playlist_id = playlists[playlist_idx].get("id")
-                        else:
-                            print(colored("Invalid playlist selection.", "red"))
-                            continue
+            for path, title in selected_episodes:
+                tui.status("info", f"Uploading: {title}")
+                content_id = upload_to_yoto(path, title, playlist_id)
+                if content_id:
+                    tui.status("ok", f"Uploaded '{title}'.")
                 else:
-                    print(colored("Invalid content selection.", "red"))
-            except ValueError:
-                print(colored("Please enter a valid number.", "red"))
+                    tui.status("err", f"Failed to upload '{title}'.")
+            tui.status("ok", "All selected episodes processed.")
+            continue
 
-        elif choice == "3":
-            # Create new playlist
-            title = input(colored("Enter playlist name: ", "white")).strip()
-            if title:
-                description = input(
-                    colored("Enter description (optional): ", "white")
-                ).strip()
-                playlist_id = create_playlist(title, description)
-                if playlist_id:
-                    print(colored(f"Successfully created playlist: {title}", "green"))
-
-        elif choice == "4":
-            # View playlists
-            playlists = get_yoto_playlists()
-            if not playlists:
-                print(colored("Could not retrieve playlists.", "red"))
+        if action == "add":
+            tui.status("info", "Fetching your existing Yoto content…")
+            content_items = get_yoto_content() or []
+            if not content_items:
+                tui.status("err", "Could not retrieve your content.")
                 continue
 
-            print("\n" + colored("Your Playlists:", "cyan"))
-            for playlist in playlists:
-                print(f"- {playlist.get('title')} (ID: {playlist.get('id')})")
-                # If the playlist has chapters, show them
-                if "chapters" in playlist and playlist["chapters"]:
-                    print(colored("  Chapters:", "yellow"))
-                    for chapter in playlist["chapters"]:
-                        print(f"    - {chapter.get('title')}")
-                else:
-                    print(colored("  No chapters (empty playlist)", "yellow"))
-
-            input(colored("\nPress Enter to continue...", "white"))
-
-        elif choice == "5":
-            # Upload all downloaded episodes
-            if not os.path.exists(podcast_dir):
-                print(colored(f"Podcast directory not found: {podcast_dir}", "red"))
-                continue
-
-            # Get playlists for selection
-            playlists = get_yoto_playlists()
-            playlist_id = None
-
-            if not playlists:
-                print(colored("Could not retrieve playlists.", "red"))
-                print(
-                    colored(
-                        "You can still upload without adding to a playlist.", "yellow"
+            selected_content = tui.select(
+                "Select content to add to a playlist",
+                [
+                    tui.Choice(
+                        title=f"{item.get('title') or '?'}  [dim]{item.get('cardId') or '?'}[/]",
+                        value=item,
                     )
-                )
-
-                playlist_choice = (
-                    input(
-                        colored("\nDo you want to add to a playlist? (y/n): ", "white")
-                    )
-                    .strip()
-                    .lower()
-                )
-                if playlist_choice == "y":
-                    playlist_id = input(colored("Enter playlist ID: ", "white")).strip()
-                    if not playlist_id:
-                        print(
-                            colored(
-                                "No playlist ID provided. Uploading without adding to playlist.",
-                                "yellow",
-                            )
-                        )
-                        playlist_id = None
-            else:
-                print("\n" + colored("Select a playlist for bulk upload:", "cyan"))
-                print(f"[{colored('N', 'green')}] No playlist (upload only)")
-                for i, playlist in enumerate(playlists):
-                    print(
-                        f"[{colored(i, 'green')}] {playlist.get('title')} (ID: {playlist.get('id')})"
-                    )
-
-                playlist_choice = (
-                    input(colored("\nEnter playlist number (or N): ", "white"))
-                    .strip()
-                    .lower()
-                )
-
-                if playlist_choice != "n":
-                    try:
-                        playlist_idx = int(playlist_choice)
-                        if 0 <= playlist_idx < len(playlists):
-                            playlist_id = playlists[playlist_idx].get("id")
-                        else:
-                            print(
-                                colored(
-                                    "Invalid playlist selection. Uploading without adding to playlist.",
-                                    "yellow",
-                                )
-                            )
-                    except ValueError:
-                        print(
-                            colored(
-                                "Invalid input. Uploading without adding to playlist.",
-                                "yellow",
-                            )
-                        )
-
-            # Find all MP3 files
-            mp3_files = []
-            for root, _, files in os.walk(podcast_dir):
-                for file in files:
-                    if file.endswith(".mp3"):
-                        mp3_files.append(os.path.join(root, file))
-
-            if not mp3_files:
-                print(colored("No MP3 files found in the podcast directory.", "yellow"))
-                continue
-
-            print(
-                colored(f"Found {len(mp3_files)} MP3 files. Starting upload...", "cyan")
+                    for item in content_items
+                ],
             )
+            if not selected_content:
+                continue
 
+            playlist_id = _pick_playlist("Select the target playlist")
+            if not playlist_id:
+                continue
+
+            content_id = selected_content.get("cardId")
+            content_title = selected_content.get("title") or ""
+            if not content_id:
+                tui.status("err", "Selected content has no cardId.")
+                continue
+
+            if add_to_playlist(content_id, playlist_id, title=content_title):
+                tui.status("ok", f"'{content_title}' added to playlist.")
+            else:
+                tui.status("err", f"Failed to add '{content_title}' to playlist.")
+            continue
+
+        if action == "create":
+            title = tui.text(
+                "Enter playlist name",
+                validate=lambda s: bool(s.strip()) or "Name required",
+            )
+            if not title:
+                continue
+            description = tui.text("Enter description (optional)") or ""
+            playlist_id = create_playlist(title.strip(), description.strip())
+            if playlist_id:
+                tui.status("ok", f"Created playlist '{title.strip()}' → {playlist_id}")
+            else:
+                tui.status("err", "Failed to create playlist.")
+            continue
+
+        if action == "view":
+            playlists = get_yoto_playlists()
+            if not playlists:
+                tui.status("err", "Could not retrieve playlists.")
+                continue
+            tui.playlist_table(playlists)
+            tui.pause()
+            continue
+
+        if action == "bulk":
+            if not os.path.exists(podcast_dir):
+                tui.status("err", f"Podcast directory not found: {podcast_dir}")
+                continue
+
+            picked = _pick_playlist("Select a playlist for bulk upload", include_none=True)
+            if picked is None:
+                continue
+            playlist_id = None if picked == "__none__" else picked
+
+            mp3_files = []
+            for root, _dirs, files in os.walk(podcast_dir):
+                for f in files:
+                    if f.endswith(".mp3"):
+                        mp3_files.append(os.path.join(root, f))
+            if not mp3_files:
+                tui.status("warn", "No MP3 files found.")
+                continue
+
+            tui.status("info", f"Found {len(mp3_files)} MP3 file(s). Starting upload…")
             for mp3_file in mp3_files:
                 title = os.path.basename(mp3_file).replace(".mp3", "")
-                print(colored(f"\nProcessing: {title}", "cyan"))
-
-                # Upload and add to playlist in one step
+                tui.status("info", f"Processing: {title}")
                 content_id = upload_to_yoto(mp3_file, title, playlist_id)
                 if content_id:
-                    print(colored(f"Uploaded and added to playlist: {title}", "green"))
-
-            print(colored("\nBulk upload completed!", "green"))
-
-        else:
-            print(colored("Invalid option or no episode selected.", "red"))
+                    tui.status("ok", f"Uploaded '{title}'.")
+                else:
+                    tui.status("err", f"Failed: '{title}'.")
+            tui.status("ok", "Bulk upload completed.")
+            continue

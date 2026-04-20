@@ -1,4 +1,3 @@
-from cgitb import grey
 import feedparser
 import requests
 import os
@@ -9,6 +8,7 @@ from tqdm import tqdm
 from pydub import AudioSegment, silence
 import yoto_api
 import icon_factory
+import tui
 
 from termcolor import colored
 
@@ -267,341 +267,229 @@ def process_audio_file(temp_file, final_filename):
             os.remove(analyze_file)
 
 
-def main_menu():
-    display_ipod_logo()
-    print("\n" + colored("=" * 30, "yellow"))
-    print(colored(" PODCAST DOWNLOADER & AD-CUTTER ", "yellow", attrs=["bold"]))
-    print(colored("=" * 30, "yellow"))
+_CUSTOM_RSS = object()
+_YOTO_MENU = object()
+_EXIT = object()
+
+
+def _build_main_choices():
+    choices = [
+        tui.Choice(title=preset[0], value=preset) for preset in PRESET_PODCASTS.values()
+    ]
+    choices.append(tui.Separator())
+    choices.append(tui.Choice(title="🔗 Add a custom RSS URL…", value=_CUSTOM_RSS))
+    choices.append(tui.Choice(title="🎵 Yoto menu", value=_YOTO_MENU))
+    choices.append(tui.Choice(title="🚪 Exit", value=_EXIT))
+    return choices
+
+
+def _fetch_feed(rss_url):
+    feed = feedparser.parse(rss_url)
+    if not feed.entries:
+        tui.status("err", "Could not retrieve feed. Please check the URL.")
+        return None
+    return feed
+
+
+def _preset_flow(preset):
+    label, rss_url = preset[0], preset[1]
+    yoto_card_id = preset[2] if len(preset) > 2 else None
+
+    tui.status("info", f"Selected: {label}")
+    if yoto_card_id:
+        tui.status("info", f"Auto-upload target: Yoto playlist [bold]{yoto_card_id}[/]")
+
+    feed = _fetch_feed(rss_url)
+    if not feed:
+        return
+
+    podcast_name = feed.feed.title.replace("/", "-").strip()
+    base_download_dir = "downloads"
+    podcast_dir = os.path.join(base_download_dir, podcast_name)
+    os.makedirs(podcast_dir, exist_ok=True)
+
+    yoto_playlist = None
+    if yoto_card_id:
+        with tui.CONSOLE.status("[cyan]Fetching Yoto playlist state…", spinner="dots"):
+            yoto_playlist = yoto_api.get_playlist_details(yoto_card_id)
+        if not yoto_playlist:
+            tui.status("warn", "Could not fetch playlist — sync status unavailable.")
+
+    def is_synced(title):
+        if not yoto_playlist:
+            return False
+        try:
+            return yoto_api.is_episode_in_playlist(title, yoto_playlist)
+        except Exception:
+            return False
+
+    icon_cache = icon_factory.load_cache(podcast_dir) if yoto_card_id else {}
 
     while True:
-        print("\nAvailable Podcasts:")
-        for key, preset in PRESET_PODCASTS.items():
-            print(f"[{colored(key, 'green')}] {preset[0]}")
+        tui.rule(podcast_name)
 
-        print(f"\n[{colored('Y', 'magenta')}] Yoto Player Integration")
-
-        user_input = input(
-            "\nEnter RSS Feed URL, Podcast Number, or Option (or type 'exit' to quit): "
-        ).strip()
-
-        if user_input.lower() == "exit":
-            break
-
-        if user_input.lower() == "y":
-            # Create base download directory if it doesn't exist
-            base_download_dir = "downloads"
-            os.makedirs(base_download_dir, exist_ok=True)
-            yoto_api.yoto_menu(base_download_dir)
-            continue
-
-        # Track if this is a preset podcast with Yoto card ID
-        yoto_card_id = None
-        if user_input in PRESET_PODCASTS:
-            preset = PRESET_PODCASTS[user_input]
-            rss_url = preset[1]
-            # Get Yoto card ID if available (3rd element in tuple)
-            if len(preset) > 2:
-                yoto_card_id = preset[2]
-            print(colored(f"Selected: {preset[0]}", "cyan"))
-            if yoto_card_id:
-                print(
-                    colored(
-                        f"  → Auto-upload to Yoto playlist: {yoto_card_id}", "magenta"
-                    )
-                )
-        else:
-            rss_url = user_input
-
-        feed = feedparser.parse(rss_url)
-
-        if not feed.entries:
-            print("Error: Could not retrieve feed. Please check the URL.")
-            continue
-
-        podcast_name = feed.feed.title.replace("/", "-").strip()
-
-        # Create download directories
-        base_download_dir = "downloads"
-        podcast_dir = os.path.join(base_download_dir, podcast_name)
-        os.makedirs(podcast_dir, exist_ok=True)
-
-        # If a Yoto card is linked, fetch the playlist so we can tell
-        # "downloaded locally" apart from "actually synced on Yoto".
-        yoto_playlist = None
+        actions = [tui.Choice(title="📥 Browse & download episodes", value="browse")]
         if yoto_card_id:
-            print(colored("Fetching Yoto playlist state...", "magenta"))
-            yoto_playlist = yoto_api.get_playlist_details(yoto_card_id)
-            if not yoto_playlist:
-                print(
-                    colored(
-                        "Could not fetch playlist — sync status will be unavailable.",
-                        "yellow",
-                    )
-                )
+            actions.append(tui.Choice(title="✨ Generate icons for this card", value="icons"))
+        actions.append(tui.Separator())
+        actions.append(tui.Choice(title="← Back to main menu", value="back"))
 
-        def is_synced(title):
-            if not yoto_playlist:
-                return False
-            try:
-                return yoto_api.is_episode_in_playlist(title, yoto_playlist)
-            except Exception:
-                return False
+        action = tui.select("What do you want to do?", actions)
+        if action in (None, "back"):
+            return
 
-        # Persistent per-podcast icon cache (title → "yoto:#<mediaId>").
-        icon_cache = icon_factory.load_cache(podcast_dir) if yoto_card_id else {}
+        if action == "icons":
+            yoto_playlist = _icons_flow(yoto_card_id, podcast_dir, yoto_playlist)
+            continue
 
-        # Pagination settings
-        page = 0
-        per_page = 15
-        total_episodes = len(feed.entries)
-        total_pages = (total_episodes + per_page - 1) // per_page
+        # browse
+        yoto_playlist = _episodes_flow(
+            feed, podcast_dir, yoto_card_id, yoto_playlist, is_synced, icon_cache
+        )
 
-        # Episode selection loop
-        while True:
-            print(
-                colored(
-                    f"\n--- {podcast_name} (Page {page + 1}/{total_pages}) ---",
-                    "cyan",
-                    attrs=["bold"],
+
+def _icons_flow(yoto_card_id, podcast_dir, yoto_playlist):
+    force = False
+    if yoto_playlist:
+        existing = icon_factory.count_custom_icons(yoto_playlist)
+        if existing:
+            force = bool(
+                tui.confirm(
+                    f"{existing} chapter(s) already have a custom icon. "
+                    "Regenerate all icons?",
+                    default=False,
                 )
             )
-            start_index = page * per_page
-            end_index = start_index + per_page
+    stats = icon_factory.backfill_playlist_icons(
+        yoto_card_id, podcast_dir=podcast_dir, force=force
+    )
+    verb = "regenerate" if force else "backfill"
+    tui.status(
+        "ok" if stats["updated"] else "info",
+        f"Icon {verb}: {stats['updated']} updated, "
+        f"{stats['skipped']} already custom, "
+        f"{stats['failed']} failed, of {stats['total']}.",
+    )
+    # Refresh so (Synced) dots stay accurate on the next browse.
+    return yoto_api.get_playlist_details(yoto_card_id)
 
-            # Display episodes for the current page
-            for i, entry in enumerate(feed.entries[start_index:end_index]):
-                episode_title = entry.title.replace("/", "-").strip()
-                final_filename = os.path.join(podcast_dir, f"{episode_title}.mp3")
-                has_local = os.path.exists(final_filename)
-                synced = is_synced(episode_title) if yoto_card_id else None
 
-                prefix = f"[{colored(i, 'yellow')}]"
-                if synced:
-                    status = colored("(Synced)", "green")
-                    print(f"{prefix} {colored(entry.title, 'blue')} {status}")
-                elif has_local and yoto_card_id:
-                    status = colored("(Downloaded, not synced)", "yellow")
-                    print(f"{prefix} {colored(entry.title, 'blue')} {status}")
-                elif has_local:
-                    status = colored("(Downloaded)", "green")
-                    print(f"{prefix} {colored(entry.title, 'blue')} {status}")
-                else:
-                    print(f"{prefix} {entry.title}")
+def _episodes_flow(feed, podcast_dir, yoto_card_id, yoto_playlist, is_synced, icon_cache):
+    # Build one scrollable checkbox list — status dots inline.
+    choices = []
+    for entry in feed.entries:
+        episode_title = entry.title.replace("/", "-").strip()
+        final_filename = os.path.join(podcast_dir, f"{episode_title}.mp3")
+        has_local = os.path.exists(final_filename)
+        synced = is_synced(episode_title) if yoto_card_id else False
+        choices.append(
+            tui.episode_choice(
+                entry.title,
+                synced=synced,
+                has_local=has_local,
+                card_linked=bool(yoto_card_id),
+                value=entry,
+            )
+        )
 
-            print(colored("\n[M]", "green") + " Back to Main Menu")
-            nav_prompt = []
-            if page > 0:
-                nav_prompt.append(colored("[P]", "green") + "rev Page")
-            if page < total_pages - 1:
-                nav_prompt.append(colored("[N]", "green") + "ext Page")
+    selected_episodes = tui.checkbox(
+        "Select episodes to download",
+        choices,
+    )
+    if not selected_episodes:
+        return yoto_playlist
+
+    downloaded_episodes = []
+
+    for selected_episode in selected_episodes:
+        episode_title = selected_episode.title.replace("/", "-").strip()
+        final_filename = os.path.join(podcast_dir, f"{episode_title}.mp3")
+
+        if yoto_card_id and is_synced(episode_title):
+            tui.status("info", f"'{episode_title}' already synced on Yoto. Skipping.")
+            continue
+
+        if os.path.exists(final_filename):
             if yoto_card_id:
-                nav_prompt.append(colored("[I]", "green") + "cons (backfill)")
-            print(" | ".join(nav_prompt))
-            print(
-                colored(
-                    "\nTip: Enter multiple numbers separated by spaces (e.g., '0 2 5') to download multiple episodes",
-                    "grey",
+                tui.status(
+                    "warn",
+                    f"'{episode_title}' downloaded but not synced. "
+                    "Queueing upload without re-downloading.",
                 )
-            )
-
-            choice = (
-                input(
-                    colored(
-                        "\nSelect episode(s), navigate pages, or go back to main menu: ",
-                        "white",
-                    )
-                )
-                .strip()
-                .lower()
-            )
-
-            if choice == "m":
-                break
-            if choice == "n" and page < total_pages - 1:
-                page += 1
-                continue
-            if choice == "p" and page > 0:
-                page -= 1
-                continue
-            if choice == "i" and yoto_card_id:
-                force = False
-                if yoto_playlist:
-                    existing = icon_factory.count_custom_icons(yoto_playlist)
-                    if existing:
-                        ans = (
-                            input(
-                                colored(
-                                    f"\n{existing} chapter(s) already have a custom icon. "
-                                    "Regenerate all icons? (y/N): ",
-                                    "magenta",
-                                )
-                            )
-                            .strip()
-                            .lower()
-                        )
-                        force = ans == "y"
-                stats = icon_factory.backfill_playlist_icons(
-                    yoto_card_id, podcast_dir=podcast_dir, force=force
-                )
-                print(
-                    colored(
-                        f"\nIcon {'regenerate' if force else 'backfill'}: "
-                        f"{stats['updated']} updated, "
-                        f"{stats['skipped']} already custom, "
-                        f"{stats['failed']} failed, of {stats['total']}.",
-                        "cyan",
-                    )
-                )
-                # Refresh the playlist so (Synced) indicators stay accurate.
-                yoto_playlist = yoto_api.get_playlist_details(yoto_card_id)
-                continue
-
-            # Parse selection - support multiple episodes separated by spaces
-            try:
-                indices = [int(idx.strip()) for idx in choice.split()]
-                if not indices:
-                    raise ValueError("No indices provided")
-
-                # Validate all indices
-                selected_episodes = []
-                for idx in indices:
-                    absolute_idx = start_index + idx
-                    if not (start_index <= absolute_idx < end_index):
-                        print(colored(f"Invalid selection: {idx}. Skipping.", "red"))
-                        continue
-                    selected_episodes.append(feed.entries[absolute_idx])
-
-                if not selected_episodes:
-                    print(colored("No valid episodes selected.", "red"))
-                    continue
-
-            except ValueError:
-                print(colored("Invalid selection. Try again.", "red"))
-                continue
-
-            # Process all selected episodes
-            downloaded_episodes = []  # Track successfully downloaded episodes
-
-            for selected_episode in selected_episodes:
-                episode_title = selected_episode.title.replace("/", "-").strip()
-
-                # Define file paths
-                final_filename = os.path.join(podcast_dir, f"{episode_title}.mp3")
-                temp_file = os.path.join(podcast_dir, "temp_processing.mp3")
-
-                # Already synced on Yoto: nothing to do.
-                if yoto_card_id and is_synced(episode_title):
-                    print(
-                        colored(
-                            f"\n'{episode_title}' already synced on Yoto. Skipping.",
-                            "yellow",
-                        )
-                    )
-                    continue
-
-                # Local file exists but not synced (e.g. previous transcoding
-                # timeout). Reuse the local file and queue it for upload.
-                if os.path.exists(final_filename):
-                    if yoto_card_id:
-                        print(
-                            colored(
-                                f"\n'{episode_title}' downloaded but not synced. "
-                                "Queueing upload without re-downloading.",
-                                "yellow",
-                            )
-                        )
-                        downloaded_episodes.append((episode_title, final_filename))
-                    else:
-                        print(
-                            colored(
-                                f"\n'{episode_title}' already downloaded. Skipping.",
-                                "yellow",
-                            )
-                        )
-                    continue
-
-                # Extract MP3 URL
-                mp3_url = None
-                for link in selected_episode.enclosures:
-                    if link.type == "audio/mpeg":
-                        mp3_url = link.href
-                        break
-
-                if not mp3_url:
-                    print(
-                        colored(
-                            f"Could not find an MP3 link for '{episode_title}'.", "red"
-                        )
-                    )
-                    continue
-
-                # Execution
-                temp_file = "temp_processing.mp3"
-                print(colored(f"\nDownloading: {episode_title}", "cyan"))
-                download_file(mp3_url, temp_file)
-
-                process_audio_file(temp_file, final_filename)
-
-                os.remove(temp_file)
-                print(colored(f"Success! '{episode_title}' downloaded.", "green"))
-
-                # Track downloaded episode
                 downloaded_episodes.append((episode_title, final_filename))
+            else:
+                tui.status("info", f"'{episode_title}' already downloaded. Skipping.")
+            continue
 
-            # After all downloads, handle Yoto upload
-            if downloaded_episodes:
-                print(
-                    colored(
-                        f"\n{len(downloaded_episodes)} episode(s) downloaded successfully!",
-                        "green",
-                    )
-                )
+        mp3_url = None
+        for link in selected_episode.enclosures:
+            if link.type == "audio/mpeg":
+                mp3_url = link.href
+                break
+        if not mp3_url:
+            tui.status("err", f"Could not find an MP3 link for '{episode_title}'.")
+            continue
 
-                # If we have a Yoto card ID, automatically upload
-                if yoto_card_id:
-                    print(
-                        colored(
-                            f"\nAuto-uploading to Yoto playlist ({yoto_card_id})...",
-                            "magenta",
-                        )
-                    )
-                    for title, path in downloaded_episodes:
-                        print(colored(f"\nUploading: {title}", "cyan"))
-                        icon_ref = icon_factory.generate_icon_ref(title, icon_cache)
-                        if icon_ref:
-                            icon_factory.save_cache(podcast_dir, icon_cache)
-                        content_id = yoto_api.upload_to_yoto(
-                            path, title, yoto_card_id, icon_ref=icon_ref
-                        )
-                        if content_id:
-                            print(
-                                colored(
-                                    f"Successfully uploaded '{title}' to playlist!",
-                                    "green",
-                                )
-                            )
-                        else:
-                            print(colored(f"Failed to upload '{title}'.", "red"))
-                    print(colored("\nAll episodes processed.", "cyan"))
+        temp_file = "temp_processing.mp3"
+        tui.status("info", f"Downloading: {episode_title}")
+        download_file(mp3_url, temp_file)
+        process_audio_file(temp_file, final_filename)
+        os.remove(temp_file)
+        tui.status("ok", f"'{episode_title}' downloaded.")
+        downloaded_episodes.append((episode_title, final_filename))
 
-                    # Refresh playlist so the episode list reflects new syncs
-                    yoto_playlist = yoto_api.get_playlist_details(yoto_card_id)
-                else:
-                    # No preset card ID, ask user if they want to upload
-                    yoto_choice = (
-                        input(
-                            colored(
-                                "\nUpload downloaded episodes to Yoto playlist? (y/n): ",
-                                "magenta",
-                            )
-                        )
-                        .strip()
-                        .lower()
-                    )
-                    if yoto_choice == "y":
-                        yoto_api.yoto_menu(
-                            podcast_dir, downloaded_episodes=downloaded_episodes
-                        )
+    if not downloaded_episodes:
+        return yoto_playlist
+
+    tui.status("ok", f"{len(downloaded_episodes)} episode(s) ready.")
+
+    if yoto_card_id:
+        tui.status("info", f"Uploading to Yoto playlist {yoto_card_id}…")
+        for title, path in downloaded_episodes:
+            tui.status("info", f"Upload: {title}")
+            icon_ref = icon_factory.generate_icon_ref(title, icon_cache)
+            if icon_ref:
+                icon_factory.save_cache(podcast_dir, icon_cache)
+            content_id = yoto_api.upload_to_yoto(
+                path, title, yoto_card_id, icon_ref=icon_ref
+            )
+            if content_id:
+                tui.status("ok", f"Uploaded '{title}'.")
+            else:
+                tui.status("err", f"Failed to upload '{title}'.")
+        tui.status("ok", "All episodes processed.")
+        return yoto_api.get_playlist_details(yoto_card_id)
+
+    if tui.confirm("Upload downloaded episodes to a Yoto playlist?", default=False):
+        yoto_api.yoto_menu(podcast_dir, downloaded_episodes=downloaded_episodes)
+    return yoto_playlist
+
+
+def main_menu():
+    tui.banner()
+
+    while True:
+        choice = tui.select("Choose a podcast or action", _build_main_choices())
+
+        if choice is None or choice is _EXIT:
+            tui.status("info", "Bye 👋")
+            return
+
+        if choice is _YOTO_MENU:
+            os.makedirs("downloads", exist_ok=True)
+            yoto_api.yoto_menu("downloads")
+            continue
+
+        if choice is _CUSTOM_RSS:
+            url = tui.text("Paste the RSS feed URL", validate=lambda s: bool(s.strip()) or "URL required")
+            if not url:
+                continue
+            preset = ("Custom RSS", url.strip())
+            _preset_flow(preset)
+            continue
+
+        # Regular preset tuple (name, rss_url[, yoto_card_id])
+        _preset_flow(choice)
 
 
 if __name__ == "__main__":
