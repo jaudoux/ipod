@@ -1,0 +1,23 @@
+# Downloaded audio and per-podcast icon caches
+downloads/
+
+# Secrets: Yoto OAuth tokens and client config (user-specific)
+yoto_tokens.json
+yoto_tokens.json.bak
+yoto_config.json
+
+# Generated Yoto icon library cache (regenerated on first run)
+yoto_public_icons.json
+
+# macOS / editor / Python cruft
+.DS_Store
+__pycache__/
+*.pyc
+*.pyo
+*.bak
+
+# Local Claude Code workspace
+.claude/
+
+# Local icon preview dumps
+/tmp/yoto_icon_preview/
