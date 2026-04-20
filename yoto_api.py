@@ -489,150 +489,89 @@ def get_yoto_content():
         return None
 
 
-def upload_to_yoto(file_path, title=None, playlist_id=None, icon_ref=None):
-    """Upload an audio file to Yoto using the correct API process.
+def _compress_if_huge(file_path):
+    """If `file_path` is >100MB, try to compress to 96kbps mono MP3.
 
-    1. Request upload URL
-    2. Upload audio to the URL
-    3. Wait for transcoding
-    4. Create content with the transcoded audio
-    5. Add to playlist if playlist_id is provided
-
-    `icon_ref` overrides the default chapter/track icon when provided.
+    Returns (upload_path, compressed_path) where compressed_path is non-None
+    only when a temp file was actually created and should be cleaned up later.
     """
+    file_size = os.path.getsize(file_path)
+    if file_size <= 100 * 1024 * 1024:
+        return file_path, None
+
+    compressed_path = f"{file_path}.compressed.mp3"
+    try:
+        subprocess.run(
+            [
+                "ffmpeg", "-y", "-i", file_path,
+                "-codec:a", "libmp3lame", "-b:a", "96k", "-ac", "1",
+                compressed_path,
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        if os.path.getsize(compressed_path) < file_size:
+            return compressed_path, compressed_path
+        # Compression didn't help — discard.
+        os.remove(compressed_path)
+        return file_path, None
+    except Exception:
+        if os.path.exists(compressed_path):
+            try:
+                os.remove(compressed_path)
+            except OSError:
+                pass
+        return file_path, None
+
+
+def _upload_audio_and_wait_transcode(file_path, title, clean_token, tag=""):
+    """Phase 1: compress if needed → request upload URL → PUT audio →
+    poll until transcoding completes.
+
+    Thread-safe: uses only stateless requests and a passed-in token.
+    Returns a dict {"transcoded_sha256", "media_info", "compressed_path"}
+    on success, or None on failure. Caller is responsible for cleaning up
+    `compressed_path` when non-None.
+
+    `tag` is a short label like "[2/5]" prepended to log lines so output
+    from parallel workers stays readable.
+    """
+    import tui
+
     if not os.path.exists(file_path):
-        print(colored(f"File not found: {file_path}", "red"))
+        tui.status("err", f"{tag} File not found: {file_path}".strip())
         return None
 
-    access_token = get_valid_token()
-
-    if not access_token:
-        access_token = authenticate_yoto()
-        if not access_token:
-            return None
-
-    # Clean token
-    clean_token = access_token.strip()
-
-    # Use filename as title if not provided
-    if not title:
-        title = os.path.basename(file_path).replace(".mp3", "")
-
-    # Get file size
-    file_size = os.path.getsize(file_path)
-    print(f"Original file size: {file_size / (1024 * 1024):.2f} MB")
-
-    # If file is too large, compress it
-    upload_path = file_path
-    compressed_path = None
-    if (
-        file_size > 100 * 1024 * 1024
-    ):  # 100 MB (Yoto can handle larger files now with transcoding)
-        print(
-            colored(
-                f"File is very large, compressing to reduce upload time...", "yellow"
-            )
-        )
-        # Create a temporary file for compressed audio
-        compressed_path = f"{file_path}.compressed.mp3"
-
-        try:
-            # First try moderate compression (96kbps mono)
-            print(colored("Trying moderate compression...", "cyan"))
-            subprocess.run(
-                [
-                    "ffmpeg",
-                    "-y",
-                    "-i",
-                    file_path,
-                    "-codec:a",
-                    "libmp3lame",
-                    "-b:a",
-                    "96k",
-                    "-ac",
-                    "1",  # mono
-                    compressed_path,
-                ],
-                check=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-
-            # Check if the compressed file is small enough
-            compressed_size = os.path.getsize(compressed_path)
-            print(f"Compressed file size: {compressed_size / (1024 * 1024):.2f} MB")
-
-            # Use the compressed file if it's smaller than the original
-            if compressed_size < file_size:
-                upload_path = compressed_path
-                print(
-                    colored(
-                        f"Using compressed file: {compressed_size / (1024 * 1024):.2f} MB",
-                        "green",
-                    )
-                )
-            else:
-                print(
-                    colored(
-                        "Compression did not reduce file size. Using original file.",
-                        "yellow",
-                    )
-                )
-                os.remove(compressed_path)
-                compressed_path = None
-                upload_path = file_path
-
-        except Exception as e:
-            print(colored(f"Compression failed: {e}", "red"))
-            print(colored("Using original file.", "yellow"))
-            if compressed_path and os.path.exists(compressed_path):
-                os.remove(compressed_path)
-            compressed_path = None
-            upload_path = file_path
+    upload_path, compressed_path = _compress_if_huge(file_path)
 
     try:
-        # STEP 1: Request upload URL
-        print(colored("Step 1: Requesting upload URL from Yoto...", "cyan"))
-        upload_url_response = requests.get(
+        # STEP 1: Request an upload URL
+        r = requests.get(
             f"{YOTO_API_URL}/media/transcode/audio/uploadUrl",
-            headers={
-                "Authorization": f"Bearer {clean_token}",
-                "Accept": "application/json",
-            },
+            headers={"Authorization": f"Bearer {clean_token}", "Accept": "application/json"},
         )
-
-        if upload_url_response.status_code != 200:
-            print(
-                colored(f"Failed to get upload URL: {upload_url_response.text}", "red")
-            )
+        if r.status_code != 200:
+            tui.status("err", f"{tag} upload URL request failed: {r.text}".strip())
             return None
-
-        upload_data = upload_url_response.json()
-        audio_upload_url = upload_data.get("upload", {}).get("uploadUrl")
-        upload_id = upload_data.get("upload", {}).get("uploadId")
-
+        upload = r.json().get("upload") or {}
+        audio_upload_url = upload.get("uploadUrl")
+        upload_id = upload.get("uploadId")
         if not audio_upload_url or not upload_id:
-            print(colored("Failed to get upload URL or upload ID", "red"))
+            tui.status("err", f"{tag} upload URL payload incomplete".strip())
             return None
 
-        print(colored(f"Got upload URL and ID: {upload_id}", "green"))
-
-        # STEP 2: Upload the audio file to the URL
-        print(colored("Step 2: Uploading audio file...", "cyan"))
-
-        # Determine content type based on file extension
-        content_type = "audio/mpeg"  # Default to MP3
+        # STEP 2: PUT the audio to the signed URL
+        tui.CONSOLE.print(f"  [cyan]{tag}[/] uploading [bold]{title}[/]")
+        content_type = "audio/mpeg"
         if upload_path.lower().endswith(".wav"):
             content_type = "audio/wav"
         elif upload_path.lower().endswith(".m4a"):
             content_type = "audio/m4a"
 
-        # Upload file using requests
         with open(upload_path, "rb") as f:
-            # Use a simple filename without special characters to avoid encoding issues
-            safe_filename = f"audio_{int(time.time())}.mp3"
-
-            upload_response = requests.put(
+            safe_filename = f"audio_{int(time.time() * 1000)}.mp3"
+            put_resp = requests.put(
                 audio_upload_url,
                 data=f.read(),
                 headers={
@@ -640,170 +579,231 @@ def upload_to_yoto(file_path, title=None, playlist_id=None, icon_ref=None):
                     "Content-Disposition": f"attachment; filename={safe_filename}",
                 },
             )
-
-        if upload_response.status_code not in [200, 201, 204]:
-            print(colored(f"Failed to upload audio: {upload_response.text}", "red"))
+        if put_resp.status_code not in (200, 201, 204):
+            tui.status("err", f"{tag} audio upload failed: {put_resp.text}".strip())
             return None
 
-        print(colored("Audio uploaded successfully", "green"))
-
-        # STEP 3: Wait for transcoding.
-        # Front-load polls so small files finish in a second or two; back off
-        # gradually but cap the interval so large files never wait long past
-        # completion. Time-budget bounded — not attempt-count.
-        import tui
-
-        transcoded_audio = None
+        # STEP 3: Poll for transcoding
+        tui.CONSOLE.print(f"  [cyan]{tag}[/] transcoding [bold]{title}[/]")
         start = time.time()
-        poll_delay = 0.5   # first re-check soon after the initial probe
-        max_delay = 15.0   # never wait longer than 15s between checks
-        budget = 600.0     # 10 min hard cap for the whole step
-
-        with tui.CONSOLE.status(
-            "[cyan]Step 3: waiting for transcoding…", spinner="dots"
-        ) as rich_status:
-            while True:
-                transcode_response = requests.get(
-                    f"{YOTO_API_URL}/media/upload/{upload_id}/transcoded?loudnorm=false",
-                    headers={
-                        "Authorization": f"Bearer {clean_token}",
-                        "Accept": "application/json",
-                    },
-                )
-
-                if transcode_response.status_code == 200:
-                    data = transcode_response.json()
-                    if data.get("transcode", {}).get("transcodedSha256"):
-                        transcoded_audio = data.get("transcode")
-                        break
-
-                elapsed = time.time() - start
-                if elapsed >= budget:
+        poll_delay = 0.5
+        max_delay = 15.0
+        budget = 600.0
+        transcoded_audio = None
+        while True:
+            rr = requests.get(
+                f"{YOTO_API_URL}/media/upload/{upload_id}/transcoded?loudnorm=false",
+                headers={"Authorization": f"Bearer {clean_token}", "Accept": "application/json"},
+            )
+            if rr.status_code == 200:
+                data = rr.json()
+                if data.get("transcode", {}).get("transcodedSha256"):
+                    transcoded_audio = data["transcode"]
                     break
+            if time.time() - start >= budget:
+                break
+            time.sleep(poll_delay)
+            poll_delay = min(poll_delay * 1.5, max_delay)
 
-                rich_status.update(
-                    f"[cyan]Step 3: waiting for transcoding… "
-                    f"({int(elapsed)}s elapsed, next check in {poll_delay:.1f}s)"
-                )
-                time.sleep(poll_delay)
-                poll_delay = min(poll_delay * 1.5, max_delay)
-
-        if transcoded_audio:
-            tui.status("ok", f"Transcoding completed in {int(time.time() - start)}s")
-        else:
-            tui.status("err", f"Transcoding timed out after {int(budget)}s")
+        if not transcoded_audio:
+            tui.status("err", f"{tag} transcoding timed out for '{title}'".strip())
             return None
 
-        # Get media info from the transcoded audio
-        media_info = transcoded_audio.get("transcodedInfo", {})
-        chapter_title = media_info.get("metadata", {}).get("title") or title
-        transcoded_sha256 = transcoded_audio.get("transcodedSha256")
-
-        # If a playlist ID was provided, add directly to that playlist without creating standalone content
-        if playlist_id:
-            print(colored("Step 4: Adding track to existing playlist...", "cyan"))
-            if add_to_playlist(
-                None,
-                playlist_id,
-                title,
-                transcoded_sha256,
-                media_info,
-                icon_ref=icon_ref,
-            ):
-                print(colored(f"Successfully added to playlist!", "green"))
-                print(
-                    colored(
-                        f"Your podcast is now available on your Yoto player!", "cyan"
-                    )
-                )
-                return playlist_id
-            else:
-                print(colored(f"Failed to add to playlist.", "red"))
-                return None
-
-        # Step 4: Create standalone content (only when no playlist_id is provided)
-        print(colored("Step 4: Creating content with transcoded audio...", "cyan"))
-
-        chapter_icon = icon_ref or DEFAULT_ICON_REF
-
-        # Create the content payload
-        # Create content with chapters structure as required by the API
-        content = {
-            "title": title,
-            "content": {
-                "chapters": [
-                    {
-                        "key": "01",
-                        "title": chapter_title,
-                        "overlayLabel": "1",
-                        "tracks": [
-                            {
-                                "key": "01",
-                                "title": chapter_title,
-                                "trackUrl": f"yoto:#{transcoded_sha256}",
-                                "duration": media_info.get("duration"),
-                                "fileSize": media_info.get("fileSize"),
-                                "channels": media_info.get("channels"),
-                                "format": media_info.get("format") or "mp3",
-                                "type": "audio",
-                                "overlayLabel": "1",
-                                "display": {
-                                    "icon16x16": chapter_icon,
-                                },
-                            }
-                        ],
-                        "display": {
-                            "icon16x16": chapter_icon,
-                        },
-                    }
-                ],
-                "playbackType": "linear",
-            },
-            "metadata": {
-                "media": {
-                    "duration": media_info.get("duration"),
-                    "fileSize": media_info.get("fileSize"),
-                    "readableFileSize": round(
-                        (media_info.get("fileSize") or 0) / 1024 / 1024, 1
-                    ),
-                },
-            },
-        }
-
-        # Create the content
-        create_response = requests.post(
-            f"{YOTO_API_URL}/content",
-            headers={
-                "Authorization": f"Bearer {clean_token}",
-                "Content-Type": "application/json",
-            },
-            json=content,
+        elapsed = int(time.time() - start)
+        tui.CONSOLE.print(
+            f"  [green]✓[/] {tag} transcoded [bold]{title}[/] in {elapsed}s"
         )
 
-        if create_response.status_code not in [200, 201, 204]:
-            print(colored(f"Failed to create content: {create_response.text}", "red"))
-            return None
-
-        result = create_response.json()
-        content_id = result.get("card", {}).get("cardId")
-
-        if not content_id:
-            print(colored("No content ID in response", "red"))
-            return None
-
-        print(colored(f"Successfully uploaded to Yoto!", "green"))
-        print(colored(f"Content ID: {content_id}", "green"))
-        print(colored(f"Your podcast is now available on your Yoto player!", "cyan"))
-        return content_id
-
+        media_info = transcoded_audio.get("transcodedInfo", {})
+        return {
+            "transcoded_sha256": transcoded_audio.get("transcodedSha256"),
+            "media_info": media_info,
+            "compressed_path": compressed_path,
+        }
     except Exception as e:
-        print(f"Error uploading file: {e}")
+        import tui as _tui
+        _tui.status("err", f"{tag} upload error for '{title}': {e}".strip())
+        if compressed_path and os.path.exists(compressed_path):
+            try:
+                os.remove(compressed_path)
+            except OSError:
+                pass
         return None
 
+
+def _attach_or_create_content(phase1, title, playlist_id, icon_ref, clean_token):
+    """Phase 2: add to playlist (if playlist_id given) or create standalone
+    content. Returns the target id (playlist_id or content_id) on success,
+    None on failure. Must run serially per-playlist to avoid write races.
+    """
+    import tui
+
+    transcoded_sha256 = phase1["transcoded_sha256"]
+    media_info = phase1["media_info"]
+    chapter_title = (media_info.get("metadata") or {}).get("title") or title
+
+    if playlist_id:
+        ok = add_to_playlist(
+            None, playlist_id, title, transcoded_sha256, media_info, icon_ref=icon_ref
+        )
+        return playlist_id if ok else None
+
+    # Create standalone content card
+    chapter_icon = icon_ref or DEFAULT_ICON_REF
+    content = {
+        "title": title,
+        "content": {
+            "chapters": [
+                {
+                    "key": "01",
+                    "title": chapter_title,
+                    "overlayLabel": "1",
+                    "tracks": [
+                        {
+                            "key": "01",
+                            "title": chapter_title,
+                            "trackUrl": f"yoto:#{transcoded_sha256}",
+                            "duration": media_info.get("duration"),
+                            "fileSize": media_info.get("fileSize"),
+                            "channels": media_info.get("channels"),
+                            "format": media_info.get("format") or "mp3",
+                            "type": "audio",
+                            "overlayLabel": "1",
+                            "display": {"icon16x16": chapter_icon},
+                        }
+                    ],
+                    "display": {"icon16x16": chapter_icon},
+                }
+            ],
+            "playbackType": "linear",
+        },
+        "metadata": {
+            "media": {
+                "duration": media_info.get("duration"),
+                "fileSize": media_info.get("fileSize"),
+                "readableFileSize": round(
+                    (media_info.get("fileSize") or 0) / 1024 / 1024, 1
+                ),
+            },
+        },
+    }
+    create_response = requests.post(
+        f"{YOTO_API_URL}/content",
+        headers={"Authorization": f"Bearer {clean_token}", "Content-Type": "application/json"},
+        json=content,
+    )
+    if create_response.status_code not in (200, 201, 204):
+        tui.status("err", f"Failed to create content: {create_response.text}")
+        return None
+    content_id = create_response.json().get("card", {}).get("cardId")
+    if not content_id:
+        tui.status("err", "No content ID in Yoto response")
+        return None
+    return content_id
+
+
+def upload_to_yoto(file_path, title=None, playlist_id=None, icon_ref=None):
+    """Upload a single audio file to Yoto. Back-compat wrapper; calls the
+    phase-1 and phase-2 functions sequentially.
+    """
+    if not title:
+        title = os.path.basename(file_path).replace(".mp3", "")
+
+    access_token = get_valid_token() or authenticate_yoto()
+    if not access_token:
+        return None
+    clean_token = access_token.strip()
+
+    phase1 = _upload_audio_and_wait_transcode(file_path, title, clean_token)
+    if not phase1:
+        return None
+    try:
+        return _attach_or_create_content(phase1, title, playlist_id, icon_ref, clean_token)
     finally:
-        # Clean up temporary files
-        if compressed_path and os.path.exists(compressed_path):
-            os.remove(compressed_path)
+        cp = phase1.get("compressed_path")
+        if cp and os.path.exists(cp):
+            try:
+                os.remove(cp)
+            except OSError:
+                pass
+
+
+def upload_many_to_playlist(
+    episodes, playlist_id, icon_resolver=None, max_workers=3
+):
+    """Pipelined upload: phase 1 (upload + transcode) runs in parallel across
+    `episodes`, phase 2 (playlist attach or content create) runs serially in
+    submission order to avoid playlist write races.
+
+    Args:
+        episodes: list of (path, title) tuples.
+        playlist_id: Yoto card id. When falsy, standalone content is created
+            for each episode.
+        icon_resolver: optional callable `title -> icon_ref`. Runs on the
+            main thread, serially, right before phase 2 of each episode.
+        max_workers: parallel phase-1 workers (default 3).
+
+    Returns a dict `title -> content_id | None` with the result of each
+    episode, in the order they were passed in.
+    """
+    import tui
+    from concurrent.futures import ThreadPoolExecutor
+
+    if not episodes:
+        return {}
+
+    access_token = get_valid_token() or authenticate_yoto()
+    if not access_token:
+        tui.status("err", "No valid Yoto token.")
+        return {title: None for (_, title) in episodes}
+    clean_token = access_token.strip()
+
+    total = len(episodes)
+    tui.status(
+        "info",
+        f"Pipelined upload of {total} episode(s) with {max_workers} workers…",
+    )
+
+    results = {}
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = [
+            pool.submit(
+                _upload_audio_and_wait_transcode,
+                path,
+                title,
+                clean_token,
+                f"[{i + 1}/{total}]",
+            )
+            for i, (path, title) in enumerate(episodes)
+        ]
+
+        # Serial finalize in submission order so chapter ordering on the
+        # playlist matches the user's selection.
+        for i, ((path, title), future) in enumerate(zip(episodes, futures), 1):
+            phase1 = future.result()
+            if not phase1:
+                results[title] = None
+                continue
+
+            try:
+                icon_ref = icon_resolver(title) if icon_resolver else None
+                content_id = _attach_or_create_content(
+                    phase1, title, playlist_id, icon_ref, clean_token
+                )
+                results[title] = content_id
+                if content_id:
+                    tui.status("ok", f"[{i}/{total}] synced '{title}'")
+                else:
+                    tui.status("err", f"[{i}/{total}] finalize failed for '{title}'")
+            finally:
+                cp = phase1.get("compressed_path")
+                if cp and os.path.exists(cp):
+                    try:
+                        os.remove(cp)
+                    except OSError:
+                        pass
+
+    return results
 
 
 def add_to_playlist(
@@ -1727,13 +1727,11 @@ def yoto_menu(podcast_dir, episode_title=None, mp3_path=None, downloaded_episode
         if not playlist_id:
             return
 
-        for title, path in downloaded_episodes:
-            tui.status("info", f"Uploading: {title}")
-            content_id = upload_to_yoto(path, title, playlist_id)
-            if content_id:
-                tui.status("ok", f"Uploaded '{title}'.")
-            else:
-                tui.status("err", f"Failed to upload '{title}'.")
+        upload_many_to_playlist(
+            [(path, title) for title, path in downloaded_episodes],
+            playlist_id,
+            max_workers=3,
+        )
         tui.status("ok", "All episodes processed.")
         return
 
@@ -1806,13 +1804,7 @@ def _yoto_menu_loop(podcast_dir, episode_title, mp3_path, find_episodes, select_
                 if not selected_episodes:
                     continue
 
-            for path, title in selected_episodes:
-                tui.status("info", f"Uploading: {title}")
-                content_id = upload_to_yoto(path, title, playlist_id)
-                if content_id:
-                    tui.status("ok", f"Uploaded '{title}'.")
-                else:
-                    tui.status("err", f"Failed to upload '{title}'.")
+            upload_many_to_playlist(selected_episodes, playlist_id, max_workers=3)
             tui.status("ok", "All selected episodes processed.")
             continue
 
@@ -1896,13 +1888,9 @@ def _yoto_menu_loop(podcast_dir, episode_title, mp3_path, find_episodes, select_
                 continue
 
             tui.status("info", f"Found {len(mp3_files)} MP3 file(s). Starting upload…")
-            for mp3_file in mp3_files:
-                title = os.path.basename(mp3_file).replace(".mp3", "")
-                tui.status("info", f"Processing: {title}")
-                content_id = upload_to_yoto(mp3_file, title, playlist_id)
-                if content_id:
-                    tui.status("ok", f"Uploaded '{title}'.")
-                else:
-                    tui.status("err", f"Failed: '{title}'.")
+            episodes = [
+                (f, os.path.basename(f).replace(".mp3", "")) for f in mp3_files
+            ]
+            upload_many_to_playlist(episodes, playlist_id, max_workers=3)
             tui.status("ok", "Bulk upload completed.")
             continue

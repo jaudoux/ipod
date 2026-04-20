@@ -445,18 +445,19 @@ def _episodes_flow(feed, podcast_dir, yoto_card_id, yoto_playlist, is_synced, ic
 
     if yoto_card_id:
         tui.status("info", f"Uploading to Yoto playlist {yoto_card_id}…")
-        for title, path in downloaded_episodes:
-            tui.status("info", f"Upload: {title}")
+
+        def resolve_icon(title):
             icon_ref = icon_factory.generate_icon_ref(title, icon_cache)
             if icon_ref:
                 icon_factory.save_cache(podcast_dir, icon_cache)
-            content_id = yoto_api.upload_to_yoto(
-                path, title, yoto_card_id, icon_ref=icon_ref
-            )
-            if content_id:
-                tui.status("ok", f"Uploaded '{title}'.")
-            else:
-                tui.status("err", f"Failed to upload '{title}'.")
+            return icon_ref
+
+        yoto_api.upload_many_to_playlist(
+            [(path, title) for title, path in downloaded_episodes],
+            yoto_card_id,
+            icon_resolver=resolve_icon,
+            max_workers=3,
+        )
         tui.status("ok", "All episodes processed.")
         return yoto_api.get_playlist_details(yoto_card_id)
 
