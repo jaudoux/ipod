@@ -211,8 +211,8 @@ def process_audio_file(temp_file, final_filename):
                 "red",
             )
         )
-        # Fallback to original pydub method
-        audio = AudioSegment.from_mp3(temp_file)
+        # Fallback to pydub — format-agnostic so m4a/AAC feeds work too.
+        audio = AudioSegment.from_file(temp_file)
         trim_ms = get_smart_trim_point(audio)
         if trim_ms > 0:
             print(
@@ -229,8 +229,10 @@ def process_audio_file(temp_file, final_filename):
             )
             final_audio = audio
 
+        # Export in whatever format the output extension implies.
+        out_ext = os.path.splitext(final_filename)[1].lstrip(".").lower() or "mp3"
         print(colored(f"Exporting: {final_filename}", "cyan"))
-        final_audio.export(final_filename, format="mp3")
+        final_audio.export(final_filename, format=out_ext)
 
     finally:
         if os.path.exists(analyze_file):
@@ -370,13 +372,46 @@ def _icons_flow(yoto_card_id, podcast_dir, yoto_playlist):
     return yoto_api.get_playlist_details(yoto_card_id)
 
 
+_AUDIO_EXTENSIONS = ("mp3", "m4a", "aac", "wav", "ogg", "mpga")
+
+
+def _extract_audio_enclosure(entry):
+    """Pick the first usable audio enclosure from a feedparser entry.
+
+    Returns (url, extension) where extension is one of _AUDIO_EXTENSIONS,
+    or (None, None) when no audio enclosure is present. Matches on any
+    `audio/*` MIME type (MP3, m4a/AAC, WAV, …) and falls back to the
+    URL's file extension when the type is missing.
+    """
+    for link in getattr(entry, "enclosures", None) or []:
+        href = link.get("href") or ""
+        if not href:
+            continue
+        mime = (link.get("type") or "").lower()
+        path = href.split("?", 1)[0].lower()
+        ext = next((e for e in _AUDIO_EXTENSIONS if path.endswith("." + e)), None)
+        if mime.startswith("audio/") or ext:
+            return href, (ext or "mp3")
+    return None, None
+
+
+def _find_local_episode(podcast_dir, episode_title):
+    """Return the path of a previously-downloaded episode regardless of
+    file extension, or None if no file exists.
+    """
+    for ext in _AUDIO_EXTENSIONS:
+        p = os.path.join(podcast_dir, f"{episode_title}.{ext}")
+        if os.path.exists(p):
+            return p
+    return None
+
+
 def _episodes_flow(feed, podcast_dir, yoto_card_id, yoto_playlist, is_synced, icon_cache):
     # Build one scrollable checkbox list — status dots inline.
     choices = []
     for entry in feed.entries:
         episode_title = entry.title.replace("/", "-").strip()
-        final_filename = os.path.join(podcast_dir, f"{episode_title}.mp3")
-        has_local = os.path.exists(final_filename)
+        has_local = _find_local_episode(podcast_dir, episode_title) is not None
         synced = is_synced(episode_title) if yoto_card_id else False
         choices.append(
             tui.episode_choice(
@@ -458,38 +493,36 @@ def _process_selected_episodes(
 
     for selected_episode in selected_episodes:
         episode_title = selected_episode.title.replace("/", "-").strip()
-        final_filename = os.path.join(podcast_dir, f"{episode_title}.mp3")
 
         if yoto_card_id and is_synced(episode_title):
             tui.status("info", f"'{episode_title}' already synced on Yoto. Skipping.")
             continue
 
-        if os.path.exists(final_filename):
+        existing = _find_local_episode(podcast_dir, episode_title)
+        if existing:
             if yoto_card_id:
                 tui.status(
                     "warn",
                     f"'{episode_title}' downloaded but not synced. "
                     "Queueing upload without re-downloading.",
                 )
-                downloaded_episodes.append((episode_title, final_filename))
+                downloaded_episodes.append((episode_title, existing))
             else:
                 tui.status("info", f"'{episode_title}' already downloaded. Skipping.")
             continue
 
-        mp3_url = None
-        for link in selected_episode.enclosures:
-            if link.type == "audio/mpeg":
-                mp3_url = link.href
-                break
-        if not mp3_url:
-            tui.status("err", f"Could not find an MP3 link for '{episode_title}'.")
+        audio_url, ext = _extract_audio_enclosure(selected_episode)
+        if not audio_url:
+            tui.status("err", f"Could not find an audio link for '{episode_title}'.")
             continue
 
-        temp_file = "temp_processing.mp3"
+        final_filename = os.path.join(podcast_dir, f"{episode_title}.{ext}")
+        temp_file = f"temp_processing.{ext}"
         tui.status("info", f"Downloading: {episode_title}")
-        download_file(mp3_url, temp_file)
+        download_file(audio_url, temp_file)
         process_audio_file(temp_file, final_filename)
-        os.remove(temp_file)
+        if os.path.exists(temp_file):
+            os.remove(temp_file)
         tui.status("ok", f"'{episode_title}' downloaded.")
         downloaded_episodes.append((episode_title, final_filename))
 
