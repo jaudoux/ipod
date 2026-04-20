@@ -328,7 +328,15 @@ def _preset_flow(preset):
     while True:
         tui.rule(podcast_name)
 
-        actions = [tui.Choice(title="📥 Browse & download episodes", value="browse")]
+        actions = []
+        if yoto_card_id:
+            actions.append(
+                tui.Choice(
+                    title="⚡ Quick sync — download & upload all new episodes",
+                    value="quick",
+                )
+            )
+        actions.append(tui.Choice(title="📥 Browse & download episodes", value="browse"))
         if yoto_card_id:
             actions.append(tui.Choice(title="✨ Generate icons for this card", value="icons"))
         actions.append(tui.Separator())
@@ -337,6 +345,12 @@ def _preset_flow(preset):
         action = tui.select("What do you want to do?", actions)
         if action in (None, "back"):
             return
+
+        if action == "quick":
+            yoto_playlist = _quick_sync_flow(
+                feed, podcast_dir, yoto_card_id, yoto_playlist, is_synced, icon_cache
+            )
+            continue
 
         if action == "icons":
             yoto_playlist = _icons_flow(yoto_card_id, podcast_dir, yoto_playlist)
@@ -399,6 +413,65 @@ def _episodes_flow(feed, podcast_dir, yoto_card_id, yoto_playlist, is_synced, ic
     if not selected_episodes:
         return yoto_playlist
 
+    return _process_selected_episodes(
+        selected_episodes,
+        podcast_dir,
+        yoto_card_id,
+        yoto_playlist,
+        is_synced,
+        icon_cache,
+    )
+
+
+def _quick_sync_flow(feed, podcast_dir, yoto_card_id, yoto_playlist, is_synced, icon_cache):
+    """Auto-select every feed entry not already on the Yoto card and run
+    the download + upload pipeline on them after a single confirmation.
+    """
+    new_entries = [
+        e for e in feed.entries
+        if not is_synced(e.title.replace("/", "-").strip())
+    ]
+    if not new_entries:
+        tui.status("ok", "Nothing to sync — every feed episode is already on Yoto.")
+        return yoto_playlist
+
+    preview_count = min(len(new_entries), 10)
+    lines = [f"  • {e.title}" for e in new_entries[:preview_count]]
+    if len(new_entries) > preview_count:
+        lines.append(f"  … and {len(new_entries) - preview_count} more")
+    tui.panel(
+        f"Quick sync — {len(new_entries)} new episode(s)",
+        "\n".join(lines),
+        style="cyan",
+    )
+
+    if not tui.confirm(
+        f"Download & upload all {len(new_entries)} new episodes?",
+        default=len(new_entries) <= 10,
+    ):
+        return yoto_playlist
+
+    return _process_selected_episodes(
+        new_entries,
+        podcast_dir,
+        yoto_card_id,
+        yoto_playlist,
+        is_synced,
+        icon_cache,
+    )
+
+
+def _process_selected_episodes(
+    selected_episodes,
+    podcast_dir,
+    yoto_card_id,
+    yoto_playlist,
+    is_synced,
+    icon_cache,
+):
+    """Download (if missing) + upload a batch of feedparser entries. Returns
+    the refreshed `yoto_playlist` (so sync dots stay accurate on return).
+    """
     downloaded_episodes = []
 
     for selected_episode in selected_episodes:

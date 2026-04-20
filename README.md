@@ -35,7 +35,10 @@ Everything is driven by arrow keys, space (multi-select), and enter.
 - **Dynamic TUI** — arrow/space/enter navigation, styled via
   [`questionary`](https://github.com/tmbo/questionary) and
   [`rich`](https://github.com/Textualize/rich).
-- **Per-preset action menu** — Browse episodes / Generate icons / Back.
+- **Per-preset action menu** — ⚡ Quick sync / Browse episodes / Generate icons / Back.
+- **Quick sync** — one-click shortcut that picks every feed entry not yet on
+  your Yoto card, confirms the count, and runs the full download + upload
+  pipeline.
 - **Status-aware episode list** — one scrollable checkbox list with inline
   status dots: `●` synced on Yoto, `◌` downloaded locally but not synced,
   `○` not downloaded yet.
