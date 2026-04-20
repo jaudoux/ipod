@@ -39,6 +39,9 @@ Everything is driven by arrow keys, space (multi-select), and enter.
 - **Quick sync** — one-click shortcut that picks every feed entry not yet on
   your Yoto card, confirms the count, and runs the full download + upload
   pipeline.
+- **Newest-at-top** — new episodes are prepended, not appended, so the most
+  recent entry always sits at the top of the card. A **🔀 Reorder** action
+  reverses chapter order on existing cards as a one-shot migration.
 - **Status-aware episode list** — one scrollable checkbox list with inline
   status dots: `●` synced on Yoto, `◌` downloaded locally but not synced,
   `○` not downloaded yet.

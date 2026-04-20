@@ -339,6 +339,9 @@ def _preset_flow(preset):
         actions.append(tui.Choice(title="📥 Browse & download episodes", value="browse"))
         if yoto_card_id:
             actions.append(tui.Choice(title="✨ Generate icons for this card", value="icons"))
+            actions.append(
+                tui.Choice(title="🔀 Reorder card (newest first)", value="reorder")
+            )
         actions.append(tui.Separator())
         actions.append(tui.Choice(title="← Back to main menu", value="back"))
 
@@ -354,6 +357,15 @@ def _preset_flow(preset):
 
         if action == "icons":
             yoto_playlist = _icons_flow(yoto_card_id, podcast_dir, yoto_playlist)
+            continue
+
+        if action == "reorder":
+            if tui.confirm(
+                "Reverse the chapter order on this card (newest first)?",
+                default=True,
+            ):
+                yoto_api.reorder_playlist(yoto_card_id, mode="reverse")
+                yoto_playlist = yoto_api.get_playlist_details(yoto_card_id)
             continue
 
         # browse

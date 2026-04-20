@@ -764,6 +764,12 @@ def upload_many_to_playlist(
         f"Pipelined upload of {total} episode(s) with {max_workers} workers…",
     )
 
+    # add_to_playlist prepends (insert at 0), so the LAST chapter finalized
+    # ends up at the top of the Yoto card. Reverse the batch so that the
+    # first user-supplied episode (typically the newest RSS entry) lands at
+    # position 0 after all inserts settle.
+    ordered = list(reversed(episodes))
+
     results = {}
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = [
@@ -772,14 +778,15 @@ def upload_many_to_playlist(
                 path,
                 title,
                 clean_token,
-                f"[{i + 1}/{total}]",
+                f"[{total - i}/{total}]",
             )
-            for i, (path, title) in enumerate(episodes)
+            for i, (path, title) in enumerate(ordered)
         ]
 
-        # Serial finalize in submission order so chapter ordering on the
-        # playlist matches the user's selection.
-        for i, ((path, title), future) in enumerate(zip(episodes, futures), 1):
+        # Serial finalize in the reversed order; chapter ordering on the
+        # resulting Yoto card matches the original input order (newest at top
+        # when the input is in RSS/newest-first order).
+        for i, ((path, title), future) in enumerate(zip(ordered, futures)):
             phase1 = future.result()
             if not phase1:
                 results[title] = None
@@ -791,10 +798,11 @@ def upload_many_to_playlist(
                     phase1, title, playlist_id, icon_ref, clean_token
                 )
                 results[title] = content_id
+                tag = f"[{total - i}/{total}]"
                 if content_id:
-                    tui.status("ok", f"[{i}/{total}] synced '{title}'")
+                    tui.status("ok", f"{tag} synced '{title}'")
                 else:
-                    tui.status("err", f"[{i}/{total}] finalize failed for '{title}'")
+                    tui.status("err", f"{tag} finalize failed for '{title}'")
             finally:
                 cp = phase1.get("compressed_path")
                 if cp and os.path.exists(cp):
@@ -942,8 +950,9 @@ def add_to_playlist(
         if media_info and media_info.get("duration"):
             new_chapter["duration"] = media_info.get("duration")
 
-        # Add the new chapter to the playlist
-        chapters.append(new_chapter)
+        # Prepend so the latest episode lands at the top of the card
+        # (Yoto displays chapters in array order).
+        chapters.insert(0, new_chapter)
 
         # Update the playlist content with the new chapters
         playlist_data["content"]["chapters"] = chapters
@@ -980,6 +989,71 @@ def add_to_playlist(
     except Exception as e:
         print(f"Error adding to playlist: {e}")
         return False
+
+
+def reorder_playlist(playlist_id, mode="reverse"):
+    """Rescue helper: reorder chapters on an existing Yoto playlist.
+
+    mode:
+      - "reverse" (default): reverse the current chapter array. Useful when
+        the card was built with the old append-only code and you want the
+        newest episode at the top.
+
+    Returns True on success, False on failure.
+    """
+    import tui
+
+    playlist = get_playlist_details(playlist_id)
+    if not playlist:
+        tui.status("err", "Could not fetch playlist.")
+        return False
+    chapters = (playlist.get("content") or {}).get("chapters") or []
+    if not chapters:
+        tui.status("warn", "Playlist has no chapters.")
+        return False
+
+    if mode == "reverse":
+        new_chapters = list(reversed(chapters))
+    else:
+        tui.status("err", f"Unknown reorder mode: {mode}")
+        return False
+
+    playlist["content"]["chapters"] = new_chapters
+
+    access_token = get_valid_token() or authenticate_yoto()
+    if not access_token:
+        tui.status("err", "No valid Yoto token.")
+        return False
+    clean_token = access_token.strip()
+
+    payload = {
+        "cardId": playlist_id,
+        "title": playlist.get("title"),
+        "content": playlist.get("content", {}),
+        "metadata": playlist.get("metadata", {}),
+    }
+    try:
+        resp = requests.post(
+            f"{YOTO_API_URL}/content",
+            headers={
+                "Authorization": f"Bearer {clean_token}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+        )
+    except requests.RequestException as e:
+        tui.status("err", f"Network error reordering playlist: {e}")
+        return False
+
+    if resp.status_code in (200, 201, 204):
+        tui.status(
+            "ok", f"Reordered playlist {playlist_id} ({len(new_chapters)} chapters)."
+        )
+        return True
+    tui.status(
+        "err", f"Reorder failed: {resp.status_code} {resp.text[:200]}"
+    )
+    return False
 
 
 def is_episode_in_playlist(episode_title, playlist):
@@ -1753,6 +1827,7 @@ def _yoto_menu_loop(podcast_dir, episode_title, mp3_path, find_episodes, select_
                 tui.Choice(title="📦  Upload all downloaded episodes", value="bulk"),
                 tui.Choice(title="🖼️   Upload a custom icon", value="icon_upload"),
                 tui.Choice(title="✨  Backfill icons for a playlist", value="icon_backfill"),
+                tui.Choice(title="🔀  Reorder a playlist (newest first)", value="reorder"),
                 tui.Separator(),
                 tui.Choice(title="← Back to main menu", value="back"),
             ],
@@ -1786,6 +1861,17 @@ def _yoto_menu_loop(podcast_dir, episode_title, mp3_path, find_episodes, select_
                 f"Done: {stats['updated']} updated, {stats['skipped']} already custom, "
                 f"{stats['failed']} failed, of {stats['total']}.",
             )
+            continue
+
+        if action == "reorder":
+            playlist_id = _pick_playlist("Reorder which playlist?")
+            if not playlist_id:
+                continue
+            if tui.confirm(
+                "Reverse the chapter order on this card (newest first)?",
+                default=True,
+            ):
+                reorder_playlist(playlist_id, mode="reverse")
             continue
 
         if action == "upload":
