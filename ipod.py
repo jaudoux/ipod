@@ -8,60 +8,10 @@ from tqdm import tqdm
 from pydub import AudioSegment, silence
 import yoto_api
 import icon_factory
+import presets
 import tui
 
 from termcolor import colored
-
-
-# Preset podcasts with optional Yoto playlist/card ID for automatic upload
-# Format: (name, rss_url, yoto_card_id or None)
-PRESET_PODCASTS = {
-    "1": (
-        "🤠 Conte-moi l'aventure !",
-        "https://feeds.audiomeans.fr/feed/2634f188-47a0-48e1-b4ae-0ac360ed3ac3.xml",
-        "fTmjI",  # Yoto card ID
-    ),
-    "2": (
-        "🐞 Bestiole",
-        "https://radiofrance-podcast.net/podcast09/rss_22046.xml",
-        "aRlyz",  # Yoto card ID
-    ),
-    "3": (
-        "🎶 Les aventures d'Octave et Mélo",
-        "https://radiofrance-podcast.net/podcast09/rss_23119.xml",
-        "1YOQg",  # Yoto card ID
-    ),
-    "4": (
-        "🧪 Curieux de sciences",
-        "https://feed.ausha.co/Bqr2pcd8Aaqp",
-        "942eV",  # Yoto card ID
-    ),
-    "5": (
-        "🏛️ Quelle histoire",
-        "https://feeds.acast.com/public/shows/quelle-histoire",
-        "4yVD9",  # Yoto card ID
-    ),
-    "6": (
-        "🔠 Petit vulgaire",
-        "https://feeds.acast.com/public/shows/petit-vulgaire",
-        "29BEO",  # Yoto card ID
-    ),
-    "7": (
-        "💡 Qui a inventé",
-        "https://feed.ausha.co/ygdr9TNV059K",
-        "1TsMM",  # Yoto card ID
-    ),
-    "8": (
-        "🪩 Discomobile",
-        "https://radiofrance-podcast.net/podcast09/rss_24630.xml",
-        "27u8W",
-    ),
-    "9": (
-	"Mini mondes",
-	"https://feeds.acast.com/public/shows/6798ff9d60e68f77d5aa65b0",
-	"2kKr5",
-    )
-}
 
 
 def display_ipod_logo():
@@ -289,15 +239,15 @@ def process_audio_file(temp_file, final_filename):
 
 _CUSTOM_RSS = object()
 _YOTO_MENU = object()
+_MANAGE = object()
 _EXIT = object()
 
 
-def _build_main_choices():
-    choices = [
-        tui.Choice(title=preset[0], value=preset) for preset in PRESET_PODCASTS.values()
-    ]
+def _build_main_choices(presets_list):
+    choices = [tui.Choice(title=preset[0], value=preset) for preset in presets_list]
     choices.append(tui.Separator())
     choices.append(tui.Choice(title="🔗 Add a custom RSS URL…", value=_CUSTOM_RSS))
+    choices.append(tui.Choice(title="🗂️  Manage podcasts", value=_MANAGE))
     choices.append(tui.Choice(title="🎵 Yoto menu", value=_YOTO_MENU))
     choices.append(tui.Choice(title="🚪 Exit", value=_EXIT))
     return choices
@@ -571,11 +521,161 @@ def _process_selected_episodes(
     return yoto_playlist
 
 
+def _preview_feed(url):
+    """Fetch an RSS feed and return (feed, title, image_url, count) or
+    (None, ...) on failure. Renders error state itself.
+    """
+    with tui.CONSOLE.status("[cyan]Fetching feed…", spinner="dots"):
+        feed = feedparser.parse(url)
+    if not feed.entries:
+        tui.status("err", "Could not retrieve feed or it has no entries.")
+        return None, None, None, 0
+    feed_title = (feed.feed.get("title") or "").strip()
+    feed_image = (feed.feed.get("image") or {}).get("href") or (
+        feed.feed.get("image") or {}
+    ).get("url")
+    return feed, feed_title, feed_image, len(feed.entries)
+
+
+def _show_feed_panel(title, image_url, count):
+    lines = [f"[bold]{title or '?'}[/]", f"[dim]Episodes:[/] {count}"]
+    if image_url:
+        lines.append(f"[dim]Artwork:[/] {image_url}")
+    else:
+        lines.append("[yellow]No artwork in feed.[/]")
+    tui.panel("Feed preview", "\n".join(lines))
+
+
+def _add_podcast_flow():
+    """Wizard: RSS URL → new Yoto card (with cover) → saved preset."""
+    url = tui.text(
+        "Paste the RSS feed URL",
+        validate=lambda s: bool(s.strip()) or "URL required",
+    )
+    if not url:
+        return
+    url = url.strip()
+
+    feed, feed_title, feed_image, count = _preview_feed(url)
+    if not feed:
+        return
+    _show_feed_panel(feed_title, feed_image, count)
+
+    name = tui.text(
+        "Display name (feel free to prefix with an emoji)",
+        default=feed_title,
+    )
+    if name is None:
+        return
+    name = name.strip() or feed_title
+
+    if not tui.confirm(
+        f"Create a new Yoto card '{name}' and link it to this feed?",
+        default=True,
+    ):
+        return
+
+    cover = None
+    if feed_image:
+        with tui.CONSOLE.status("[cyan]Uploading artwork to Yoto…", spinner="dots"):
+            cover = yoto_api.upload_cover_image(feed_image, cover_type="podcast")
+        if cover:
+            tui.status("ok", "Artwork uploaded.")
+        else:
+            tui.status("warn", "Artwork upload failed — creating card without cover.")
+
+    with tui.CONSOLE.status("[cyan]Creating Yoto card…", spinner="dots"):
+        card_id = yoto_api.create_playlist(title=name, cover=cover)
+    if not card_id:
+        tui.status("err", "Failed to create Yoto card — preset not saved.")
+        return
+
+    presets.add((name, url, card_id))
+    tui.status("ok", f"Added '{name}' → Yoto card [bold]{card_id}[/]")
+
+
+def _attach_podcast_flow():
+    """Wizard: RSS URL → pick an existing Yoto card → saved preset."""
+    url = tui.text(
+        "Paste the RSS feed URL",
+        validate=lambda s: bool(s.strip()) or "URL required",
+    )
+    if not url:
+        return
+    url = url.strip()
+
+    feed, feed_title, feed_image, count = _preview_feed(url)
+    if not feed:
+        return
+    _show_feed_panel(feed_title, feed_image, count)
+
+    name = tui.text(
+        "Display name",
+        default=feed_title,
+    )
+    if name is None:
+        return
+    name = name.strip() or feed_title
+
+    card_id = yoto_api._pick_playlist("Pick the Yoto card to link")
+    if not card_id:
+        return
+
+    presets.add((name, url, card_id))
+    tui.status("ok", f"Linked '{name}' → Yoto card [bold]{card_id}[/]")
+
+
+def _rename_podcast_flow(presets_list):
+    if not presets_list:
+        tui.status("info", "No presets to rename yet.")
+        return
+    picked = tui.select(
+        "Rename which podcast?",
+        [tui.Choice(title=p[0], value=p) for p in presets_list],
+    )
+    if picked is None:
+        return
+    new_name = tui.text("New display name", default=picked[0])
+    if new_name is None:
+        return
+    new_name = new_name.strip()
+    if not new_name or new_name == picked[0]:
+        return
+    if presets.rename(picked[1], new_name):
+        tui.status("ok", f"Renamed to '{new_name}'.")
+    else:
+        tui.status("err", "Could not find that preset.")
+
+
+def _manage_menu(presets_list):
+    choices = [
+        tui.Choice(title="➕ Add a new podcast", value="add"),
+        tui.Choice(title="📎 Attach existing Yoto card", value="attach"),
+    ]
+    if presets_list:
+        choices.append(tui.Choice(title="✏️  Rename a podcast", value="rename"))
+    choices.append(tui.Separator())
+    choices.append(tui.Choice(title="← Back", value="back"))
+
+    action = tui.select("Manage podcasts", choices)
+    if action in (None, "back"):
+        return
+    if action == "add":
+        _add_podcast_flow()
+    elif action == "attach":
+        _attach_podcast_flow()
+    elif action == "rename":
+        _rename_podcast_flow(presets_list)
+
+
 def main_menu():
     tui.banner()
 
     while True:
-        choice = tui.select("Choose a podcast or action", _build_main_choices())
+        presets_list = presets.load()
+        choice = tui.select(
+            "Choose a podcast or action", _build_main_choices(presets_list)
+        )
 
         if choice is None or choice is _EXIT:
             tui.status("info", "Bye 👋")
@@ -586,8 +686,15 @@ def main_menu():
             yoto_api.yoto_menu("downloads")
             continue
 
+        if choice is _MANAGE:
+            _manage_menu(presets_list)
+            continue
+
         if choice is _CUSTOM_RSS:
-            url = tui.text("Paste the RSS feed URL", validate=lambda s: bool(s.strip()) or "URL required")
+            url = tui.text(
+                "Paste the RSS feed URL",
+                validate=lambda s: bool(s.strip()) or "URL required",
+            )
             if not url:
                 continue
             preset = ("Custom RSS", url.strip())

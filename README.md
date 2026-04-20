@@ -97,6 +97,12 @@ python3 ipod.py
   [dashboard.yoto.dev](https://dashboard.yoto.dev/). The app then runs the
   Yoto OAuth device flow in your browser; the code is saved to
   `yoto_tokens.json` for subsequent runs.
+- Your podcast list lives at `~/.config/ipod/podcasts.json` (created empty
+  on first run). Populate it from the app via **🗂️  Manage podcasts → ➕
+  Add a new podcast** — it creates the Yoto card for you, uploads the
+  feed's official artwork as the cover, and saves the new preset. You can
+  also **📎 Attach** a feed to a card you already have on Yoto, or
+  **✏️  Rename** any preset.
 - Pick a preset from the main menu to start. If it's linked to a Yoto card,
   pick **Browse & download episodes**, tick the episodes you want with
   `<space>`, and press `<enter>`.
@@ -130,12 +136,14 @@ Environment variables (all optional):
 | `OLLAMA_MODEL` | `llama3.1:latest` | Model name used for keyword extraction. |
 | `OLLAMA_TIMEOUT` | `15` | Seconds before the Ollama request gives up. |
 
-Local files (all gitignored):
+Local files:
 
-- `yoto_config.json` — your Yoto client ID.
-- `yoto_tokens.json` — OAuth access + refresh tokens.
-- `yoto_public_icons.json` — cached Yoto icon library (~190 KB).
-- `downloads/` — audio files and per-podcast icon cache.
+- `~/.config/ipod/podcasts.json` — your podcast list (auto-created, never
+  tracked in git). Hand-editable JSON.
+- `yoto_config.json` — your Yoto client ID. *(gitignored)*
+- `yoto_tokens.json` — OAuth access + refresh tokens. *(gitignored)*
+- `yoto_public_icons.json` — cached Yoto icon library (~190 KB). *(gitignored)*
+- `downloads/` — audio files and per-podcast icon cache. *(gitignored)*
 
 ## Project layout
 
@@ -143,6 +151,7 @@ Local files (all gitignored):
 ipod.py          # top-level menu, episode browser, download/upload orchestration
 yoto_api.py      # OAuth device flow, content/media/icon endpoints, yoto_menu
 icon_factory.py  # keyword extraction, icon matching, backfill
+presets.py       # per-user podcast list persisted at ~/.config/ipod/podcasts.json
 tui.py           # shared questionary + rich primitives
 requirements.txt # questionary, rich, feedparser, pydub, requests, pillow, tqdm, termcolor
 ```

@@ -1610,12 +1610,66 @@ def _icon_file_flow():
     return None
 
 
-def create_playlist(title, description=None):
+def upload_cover_image(image_url, cover_type="podcast"):
+    """Upload a cover image to Yoto by URL. Yoto fetches the image itself.
+
+    POST /media/coverImage/user/me/upload?imageUrl=<url>&coverType=<type>&autoconvert=true
+
+    Args:
+        image_url: Public URL of the image (e.g. from an RSS feed's itunes:image).
+        cover_type: One of "podcast" (600×600), "default" (1011×638), etc.
+
+    Returns:
+        {"mediaId": ..., "mediaUrl": ...} on success, None on any failure.
+    """
+    access_token = get_valid_token()
+    if not access_token:
+        access_token = authenticate_yoto()
+        if not access_token:
+            return None
+    clean_token = access_token.strip()
+
+    url = (
+        f"{YOTO_API_URL}/media/coverImage/user/me/upload"
+        f"?imageUrl={requests.utils.quote(image_url, safe='')}"
+        f"&coverType={cover_type}"
+        f"&autoconvert=true"
+    )
+    try:
+        response = requests.post(
+            url,
+            headers={
+                "Authorization": f"Bearer {clean_token}",
+                "Accept": "application/json",
+            },
+            timeout=30,
+        )
+    except requests.RequestException:
+        return None
+
+    if response.status_code not in (200, 201):
+        return None
+
+    try:
+        data = response.json()
+    except ValueError:
+        return None
+
+    cover = data.get("coverImage") or {}
+    media_id = cover.get("mediaId")
+    media_url = cover.get("mediaUrl")
+    if not media_id or not media_url:
+        return None
+    return {"mediaId": media_id, "mediaUrl": media_url}
+
+
+def create_playlist(title, description=None, cover=None):
     """Create a new playlist/card on Yoto.
 
     Args:
         title: The title for the new playlist
         description: Optional description for the playlist
+        cover: Optional {"mediaId": ..., "mediaUrl": ...} from upload_cover_image
 
     Returns:
         The card ID of the created playlist, or None if creation failed
@@ -1631,6 +1685,13 @@ def create_playlist(title, description=None):
     clean_token = access_token.strip()
 
     try:
+        metadata = {
+            "description": description or "Created by iPod Podcast Downloader",
+            "category": "stories",
+        }
+        if cover:
+            metadata["cover"] = cover
+
         # Create a new card/playlist using the /content endpoint
         # This creates an empty playlist with one chapter ready for tracks
         new_playlist = {
@@ -1648,10 +1709,7 @@ def create_playlist(title, description=None):
                 ],
                 "playbackType": "linear",
             },
-            "metadata": {
-                "description": description or "Created by iPod Podcast Downloader",
-                "category": "stories",
-            },
+            "metadata": metadata,
         }
 
         response = requests.post(
