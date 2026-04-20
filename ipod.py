@@ -115,22 +115,42 @@ def get_retry_session():
     return session
 
 
-def get_smart_trim_point(audio_segment, min_silence_len=1000, silence_thresh=-45):
-    """
-    Scans the first 5 minutes for the first significant silence gap.
-    """
-    # Analyze only the first 5 minutes to save CPU
-    intro_chunk = audio_segment[:300000]
+def get_smart_trim_point(audio_segment):
+    """Find the end of an intro/ad break, if any, within the first 2 minutes.
 
-    # detect_silence returns a list of [start, end] time periods
+    Kids-podcast heuristic:
+    - Ignore speech-cadence pauses (< 1.5s).
+    - Only consider silence *endings* between 10s and 75s. Below → likely
+      just natural speech, not an ad boundary. Above → almost certainly
+      eating real content on short kids episodes.
+    - Pick the longest qualifying silence, not the first — the longest pause
+      within the window is most likely the intentional transition between
+      intro/ad and the actual content.
+
+    Returns ms from start to trim to, or 0 for "keep original".
+    """
+    SEARCH_WINDOW_MS = 120_000  # first 2 minutes only
+    MIN_SILENCE_LEN = 1500      # ms — filter out normal speech pauses
+    SILENCE_THRESH = -40        # dBFS — a touch less strict than -45
+    MIN_TRIM_MS = 10_000        # < 10s = noise
+    MAX_TRIM_MS = 75_000        # > 75s = probably eating content
+
+    intro_chunk = audio_segment[:SEARCH_WINDOW_MS]
     silences = silence.detect_silence(
-        intro_chunk, min_silence_len=min_silence_len, silence_thresh=silence_thresh
+        intro_chunk,
+        min_silence_len=MIN_SILENCE_LEN,
+        silence_thresh=SILENCE_THRESH,
     )
 
-    if silences:
-        # We take the end of the very first silence found
-        return silences[0][1]
-    return 0
+    candidates = [
+        (start, end) for start, end in silences
+        if MIN_TRIM_MS <= end <= MAX_TRIM_MS
+    ]
+    if not candidates:
+        return 0
+
+    start, end = max(candidates, key=lambda s: s[1] - s[0])
+    return end
 
 
 def download_file(url, filename, desc="Downloading"):
