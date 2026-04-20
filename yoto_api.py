@@ -647,40 +647,51 @@ def upload_to_yoto(file_path, title=None, playlist_id=None, icon_ref=None):
 
         print(colored("Audio uploaded successfully", "green"))
 
-        # STEP 3: Wait for transcoding (exponential backoff)
-        print(colored("Step 3: Waiting for transcoding to complete...", "cyan"))
+        # STEP 3: Wait for transcoding.
+        # Front-load polls so small files finish in a second or two; back off
+        # gradually but cap the interval so large files never wait long past
+        # completion. Time-budget bounded — not attempt-count.
+        import tui
+
         transcoded_audio = None
-        attempts = 0
-        max_attempts = 10
-        delay = 2
-        max_delay = 60
+        start = time.time()
+        poll_delay = 0.5   # first re-check soon after the initial probe
+        max_delay = 15.0   # never wait longer than 15s between checks
+        budget = 600.0     # 10 min hard cap for the whole step
 
-        while attempts < max_attempts:
-            transcode_response = requests.get(
-                f"{YOTO_API_URL}/media/upload/{upload_id}/transcoded?loudnorm=false",
-                headers={
-                    "Authorization": f"Bearer {clean_token}",
-                    "Accept": "application/json",
-                },
-            )
+        with tui.CONSOLE.status(
+            "[cyan]Step 3: waiting for transcoding…", spinner="dots"
+        ) as rich_status:
+            while True:
+                transcode_response = requests.get(
+                    f"{YOTO_API_URL}/media/upload/{upload_id}/transcoded?loudnorm=false",
+                    headers={
+                        "Authorization": f"Bearer {clean_token}",
+                        "Accept": "application/json",
+                    },
+                )
 
-            if transcode_response.status_code == 200:
-                data = transcode_response.json()
-                if data.get("transcode", {}).get("transcodedSha256"):
-                    transcoded_audio = data.get("transcode")
-                    print(colored("Transcoding completed successfully", "green"))
+                if transcode_response.status_code == 200:
+                    data = transcode_response.json()
+                    if data.get("transcode", {}).get("transcodedSha256"):
+                        transcoded_audio = data.get("transcode")
+                        break
+
+                elapsed = time.time() - start
+                if elapsed >= budget:
                     break
 
-            print(
-                f"Waiting for transcoding... Attempt {attempts+1}/{max_attempts} "
-                f"(sleeping {delay}s)"
-            )
-            time.sleep(delay)
-            attempts += 1
-            delay = min(delay * 2, max_delay)
+                rich_status.update(
+                    f"[cyan]Step 3: waiting for transcoding… "
+                    f"({int(elapsed)}s elapsed, next check in {poll_delay:.1f}s)"
+                )
+                time.sleep(poll_delay)
+                poll_delay = min(poll_delay * 1.5, max_delay)
 
-        if not transcoded_audio:
-            print(colored("Transcoding timed out", "red"))
+        if transcoded_audio:
+            tui.status("ok", f"Transcoding completed in {int(time.time() - start)}s")
+        else:
+            tui.status("err", f"Transcoding timed out after {int(budget)}s")
             return None
 
         # Get media info from the transcoded audio
