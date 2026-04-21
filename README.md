@@ -112,10 +112,12 @@ python3 ipod.py    # if cloned manually
   `yoto_tokens.json` for subsequent runs.
 - Your podcast list lives at `~/.config/ipod/podcasts.json` (created empty
   on first run). Populate it from the app via **🗂️  Manage podcasts → ➕
-  Add a new podcast** — it creates the Yoto card for you, uploads the
-  feed's official artwork as the cover, and saves the new preset. You can
-  also **📎 Attach** a feed to a card you already have on Yoto, or
-  **✏️  Rename** any preset.
+  Add a new podcast**. You can either pick from a short curated starter
+  list (Les Odyssées, Bestioles, Une histoire et… Oli, Les P'tits Bateaux,
+  Salut l'info !, Encore une histoire) or paste your own RSS URL — either
+  way the app creates the Yoto card, uploads the feed's official artwork
+  as the cover, and saves the new preset. You can also **📎 Attach** a
+  feed to a card you already have on Yoto, or **✏️  Rename** any preset.
 - Pick a preset from the main menu to start. If it's linked to a Yoto card,
   pick **Browse & download episodes**, tick the episodes you want with
   `<space>`, and press `<enter>`.

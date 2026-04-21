@@ -20,6 +20,43 @@ CONFIG_PATH = Path.home() / ".config" / "ipod" / "podcasts.json"
 Preset = tuple[str, str, str | None]
 
 
+# Curated starter list for first-time users. Each entry must resolve to a real
+# RSS feed — check new additions with feedparser before shipping them.
+# (name, rss_url, tag). `tag` is a short one-liner shown next to the name.
+SUGGESTIONS: list[dict] = [
+    {
+        "name": "Les Odyssées",
+        "url": "https://radiofrance-podcast.net/podcast09/rss_20108.xml",
+        "tag": "France Inter · 7–12 ans · Histoire",
+    },
+    {
+        "name": "Bestioles",
+        "url": "https://radiofrance-podcast.net/podcast09/rss_22046.xml",
+        "tag": "France Inter · 5–7 ans · Nature & animaux",
+    },
+    {
+        "name": "Une histoire et… Oli",
+        "url": "https://radiofrance-podcast.net/podcast09/35099478-7c72-4f9e-a6de-1b928400e9e5/podcast_d555ed4e-dbe5-4908-912e-b3169f9ceede.xml",
+        "tag": "France Inter · 5–7 ans · Histoires du soir",
+    },
+    {
+        "name": "Les P'tits Bateaux",
+        "url": "https://radiofrance-podcast.net/podcast09/rss_10137.xml",
+        "tag": "France Inter · 5–10 ans · Questions d'enfants",
+    },
+    {
+        "name": "Salut l'info !",
+        "url": "https://radiofrance-podcast.net/podcast09/rss_20689.xml",
+        "tag": "franceinfo × Astrapi · 7–11 ans · Actualité",
+    },
+    {
+        "name": "Encore une histoire",
+        "url": "https://access.acast.com/rss/670d1795df4dd6f896655670/",
+        "tag": "Acast · 4+ · Contes et classiques",
+    },
+]
+
+
 def _ensure_parent() -> None:
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
 

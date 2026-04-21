@@ -636,15 +636,65 @@ def _show_feed_panel(title, image_url, count):
     tui.panel("Feed preview", "\n".join(lines))
 
 
+def _pick_suggestion():
+    """Let the user pick a curated starter feed. Returns (url, default_name)
+    or None if they bailed out. Already-added feeds are marked and disabled.
+    """
+    existing_urls = {p[1] for p in presets.load()}
+    choices = []
+    for sug in presets.SUGGESTIONS:
+        already = sug["url"] in existing_urls
+        label = sug["name"]
+        if sug.get("tag"):
+            label = f"{label}  ·  {sug['tag']}"
+        choices.append(
+            tui.Choice(
+                title=label,
+                value=sug,
+                disabled="already added" if already else None,
+            )
+        )
+    choices.append(tui.Separator())
+    choices.append(tui.Choice(title="← Back", value=None))
+
+    picked = tui.select("Pick a podcast to add", choices)
+    if picked is None:
+        return None
+    return picked["url"], picked["name"]
+
+
 def _add_podcast_flow():
-    """Wizard: RSS URL → new Yoto card (with cover) → saved preset."""
-    url = tui.text(
-        "Paste the RSS feed URL",
-        validate=lambda s: bool(s.strip()) or "URL required",
+    """Wizard: pick a source → new Yoto card (with cover) → saved preset.
+
+    The source is either a curated starter feed (bundled in
+    `presets.SUGGESTIONS`) or a hand-pasted RSS URL.
+    """
+    source = tui.select(
+        "How do you want to add this podcast?",
+        [
+            tui.Choice(title="✨ Pick from the suggested list", value="suggest"),
+            tui.Choice(title="🔗 Paste an RSS URL", value="custom"),
+            tui.Separator(),
+            tui.Choice(title="← Back", value=None),
+        ],
     )
-    if not url:
+    if source is None:
         return
-    url = url.strip()
+
+    default_name = None
+    if source == "suggest":
+        picked = _pick_suggestion()
+        if picked is None:
+            return
+        url, default_name = picked
+    else:
+        url = tui.text(
+            "Paste the RSS feed URL",
+            validate=lambda s: bool(s.strip()) or "URL required",
+        )
+        if not url:
+            return
+        url = url.strip()
 
     feed, feed_title, feed_image, count = _preview_feed(url)
     if not feed:
@@ -653,11 +703,11 @@ def _add_podcast_flow():
 
     name = tui.text(
         "Display name (feel free to prefix with an emoji)",
-        default=feed_title,
+        default=default_name or feed_title,
     )
     if name is None:
         return
-    name = name.strip() or feed_title
+    name = name.strip() or default_name or feed_title
 
     if not tui.confirm(
         f"Create a new Yoto card '{name}' and link it to this feed?",
