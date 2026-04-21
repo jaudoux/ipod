@@ -173,6 +173,7 @@ def episode_choice(
     has_local: bool,
     card_linked: bool,
     value: Any = None,
+    emoji: str | None = None,
 ) -> Choice:
     """Build a questionary.Choice styled with a status dot + label.
 
@@ -180,6 +181,9 @@ def episode_choice(
     - ◌ yellow  → downloaded locally but not synced
     - ● dim     → downloaded locally (no Yoto card linked)
     - ○ dim     → not downloaded yet
+
+    `emoji` is rendered between the status dot and the title when provided,
+    so users can see at a glance which visual was picked for each chapter.
     """
     if synced:
         dot, badge = ("● ", "[green]Synced[/]")
@@ -197,6 +201,8 @@ def episode_choice(
 
     parts: list[tuple[str, str]] = []
     parts.append(("fg:#00d0ff" if synced else "fg:#888888", dot))
+    if emoji:
+        parts.append(("", f"{emoji}  "))
     parts.append(("", _truncate(title, max_title)))
     if synced:
         parts.append(("fg:#22dd88 italic", "   · synced"))

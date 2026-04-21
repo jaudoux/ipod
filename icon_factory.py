@@ -926,6 +926,51 @@ def save_cache(podcast_dir: str | None, cache: dict) -> None:
         tui.status("warn", f"Could not save icon cache: {e}")
 
 
+# Cache entries are either a bare icon_ref string (legacy) or a dict with
+# {"ref": icon_ref, "emoji": "🐳", "source": "emoji"|"yoto"|"web"|"iconify"}.
+# The richer form lets the TUI show the chosen emoji next to titles.
+
+
+def cached_ref(cache: dict, title: str) -> str | None:
+    """Return the icon_ref stored for `title`, normalizing legacy/dict forms."""
+    entry = cache.get(title)
+    if entry is None:
+        return None
+    if isinstance(entry, dict):
+        return entry.get("ref")
+    return entry
+
+
+def cached_emoji(cache: dict, title: str) -> str | None:
+    """Return the emoji glyph stored for `title`, or None."""
+    entry = cache.get(title)
+    if isinstance(entry, dict):
+        return entry.get("emoji")
+    return None
+
+
+def _set_cache(
+    cache: dict, title: str, ref: str, *, emoji: str | None, source: str
+) -> None:
+    entry: dict = {"ref": ref, "source": source}
+    if emoji:
+        entry["emoji"] = emoji
+    cache[title] = entry
+
+
+def _emoji_char_from_filename(image_name: str) -> str:
+    """Convert an emoji-datasource filename like '1f39e-fe0f.png' to '🎞️'.
+
+    Returns '' if the filename isn't parseable as hex codepoints — callers
+    can truthiness-check the result.
+    """
+    stem = image_name.rsplit(".", 1)[0]
+    try:
+        return "".join(chr(int(p, 16)) for p in stem.split("-") if p)
+    except ValueError:
+        return ""
+
+
 _LEADING_PARTICLES_RE = re.compile(
     r"^(?:"
     r"[-:–—·|]+\s*"           # leading dash / colon / bullet
@@ -1009,8 +1054,10 @@ def generate_icon_ref(
     """
     if cache is None:
         cache = {}
-    if not force and title in cache:
-        return cache[title]
+    if not force:
+        existing = cached_ref(cache, title)
+        if existing:
+            return existing
 
     keywords = extract_keywords(keyword_source if keyword_source else title)
     if not keywords:
@@ -1025,7 +1072,7 @@ def generate_icon_ref(
         if kind == "yoto":
             icon = payload
             icon_ref = f"yoto:#{icon['mediaId']}"
-            cache[title] = icon_ref
+            _set_cache(cache, title, icon_ref, emoji=None, source="yoto")
             label = icon.get("title") or ""
             if not label.strip():
                 tag_sample = ", ".join((icon.get("publicTags") or [])[:3])
@@ -1038,20 +1085,23 @@ def generate_icon_ref(
         # kind == "emoji"
         icon_ref = _upload_emoji_image(payload)
         if icon_ref:
-            cache[title] = icon_ref
+            emoji_char = _emoji_char_from_filename(payload)
+            _set_cache(cache, title, icon_ref, emoji=emoji_char, source="emoji")
+            glyph = f"{emoji_char}  " if emoji_char else ""
             tui.CONSOLE.print(
-                f"  [green]●[/] {title} [dim]→[/] Apple emoji «{payload}» "
+                f"  [green]●[/] {title} [dim]→[/] {glyph}Apple emoji «{payload}» "
                 f"[dim](via {matched_kw!r})[/]"
             )
             return icon_ref
         # emoji upload failed — fall through to Openverse/Iconify
+        tui.status("warn", f"Emoji upload failed for {title!r} ({payload}).")
 
     # Fallback: pull a CC-licensed PNG from Openverse and pixelate it.
     for keyword in keywords:
         web = _upload_web_icon(keyword)
         if web:
             icon_ref, source_title = web
-            cache[title] = icon_ref
+            _set_cache(cache, title, icon_ref, emoji=None, source="web")
             tui.CONSOLE.print(
                 f"  [green]●[/] {title} [dim]→[/] Web «{source_title}»"
             )
@@ -1088,7 +1138,7 @@ def generate_icon_ref(
             continue
 
         icon_ref = f"yoto:#{media_id}"
-        cache[title] = icon_ref
+        _set_cache(cache, title, icon_ref, emoji=None, source="iconify")
         tui.CONSOLE.print(
             f"  [green]●[/] {title} [dim]→[/] Iconify «{icon['name']}»"
         )
@@ -1203,6 +1253,55 @@ def backfill_playlist_icons(
         # Keep the cache: icons were uploaded, we can retry the POST later.
 
     return stats
+
+
+def regenerate_chapter_icon(
+    playlist_id: str,
+    chapter_title: str,
+    podcast_dir: str | None = None,
+) -> bool:
+    """Regenerate and push the icon for a single chapter, bypassing the cache.
+
+    Useful for iterating on the matcher without rerunning a whole playlist
+    backfill. Returns True on successful push, False otherwise.
+    """
+    playlist = yoto_api.get_playlist_details(playlist_id)
+    if not playlist:
+        tui.status("err", "Could not fetch playlist.")
+        return False
+
+    chapters = (playlist.get("content") or {}).get("chapters") or []
+    target = next(
+        (c for c in chapters if (c.get("title") or "").strip() == chapter_title),
+        None,
+    )
+    if not target:
+        tui.status("err", f"Chapter not found: {chapter_title!r}")
+        return False
+
+    all_titles = [(c.get("title") or "").strip() for c in chapters]
+    series_prefixes = detect_series_prefixes(all_titles)
+    keyword_source = series_prefixes.get(chapter_title)
+
+    cache = load_cache(podcast_dir)
+    icon_ref = generate_icon_ref(
+        chapter_title, cache, force=True, keyword_source=keyword_source
+    )
+    if not icon_ref:
+        tui.status("err", f"No icon generated for {chapter_title!r}.")
+        return False
+    save_cache(podcast_dir, cache)
+
+    target.setdefault("display", {})["icon16x16"] = icon_ref
+    for track in target.get("tracks") or []:
+        track.setdefault("display", {})["icon16x16"] = icon_ref
+
+    tui.status("info", f"Pushing update to Yoto…")
+    if not _post_playlist_update(playlist_id, playlist):
+        tui.status("err", "Failed to update playlist.")
+        return False
+    tui.status("ok", f"Icon updated for {chapter_title!r}.")
+    return True
 
 
 def _post_playlist_update(playlist_id: str, playlist: dict) -> bool:

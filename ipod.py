@@ -312,6 +312,12 @@ def _preset_flow(preset):
         if yoto_card_id:
             actions.append(tui.Choice(title="✨ Generate icons for this card", value="icons"))
             actions.append(
+                tui.Choice(
+                    title="🎯 Regenerate icon for one chapter…",
+                    value="single_icon",
+                )
+            )
+            actions.append(
                 tui.Choice(title="🔀 Reorder card (newest first)", value="reorder")
             )
         actions.append(tui.Separator())
@@ -329,6 +335,16 @@ def _preset_flow(preset):
 
         if action == "icons":
             yoto_playlist = _icons_flow(yoto_card_id, podcast_dir, yoto_playlist)
+            continue
+
+        if action == "single_icon":
+            yoto_playlist = _single_icon_flow(
+                yoto_card_id, podcast_dir, yoto_playlist, icon_cache
+            )
+            # Re-read the cache from disk so the new emoji shows up on the
+            # next browse without restarting the app.
+            icon_cache.clear()
+            icon_cache.update(icon_factory.load_cache(podcast_dir))
             continue
 
         if action == "reorder":
@@ -369,6 +385,46 @@ def _icons_flow(yoto_card_id, podcast_dir, yoto_playlist):
         f"{stats['failed']} failed, of {stats['total']}.",
     )
     # Refresh so (Synced) dots stay accurate on the next browse.
+    return yoto_api.get_playlist_details(yoto_card_id)
+
+
+def _single_icon_flow(yoto_card_id, podcast_dir, yoto_playlist, icon_cache):
+    """Pick one chapter from the Yoto card and regenerate its icon only.
+
+    Bypasses the icon cache so changes to the matcher show up on the first
+    run — no `force all` sweep needed to iterate on one episode.
+    """
+    if yoto_playlist is None:
+        with tui.CONSOLE.status("[cyan]Fetching playlist…", spinner="dots"):
+            yoto_playlist = yoto_api.get_playlist_details(yoto_card_id)
+    if not yoto_playlist:
+        tui.status("err", "Could not fetch playlist.")
+        return yoto_playlist
+
+    chapters = (yoto_playlist.get("content") or {}).get("chapters") or []
+    chapters = [c for c in chapters if (c.get("title") or "").strip()]
+    if not chapters:
+        tui.status("warn", "Playlist has no chapters.")
+        return yoto_playlist
+
+    def _label(chapter):
+        title = (chapter.get("title") or "").strip()
+        emoji = icon_factory.cached_emoji(icon_cache, title)
+        return f"{emoji}  {title}" if emoji else title
+
+    choices = [
+        tui.Choice(title=_label(c), value=(c.get("title") or "").strip())
+        for c in chapters
+    ]
+    selected_title = tui.select(
+        "Which chapter's icon should we regenerate?", choices
+    )
+    if selected_title is None:
+        return yoto_playlist
+
+    icon_factory.regenerate_chapter_icon(
+        yoto_card_id, selected_title, podcast_dir=podcast_dir
+    )
     return yoto_api.get_playlist_details(yoto_card_id)
 
 
@@ -420,6 +476,7 @@ def _episodes_flow(feed, podcast_dir, yoto_card_id, yoto_playlist, is_synced, ic
                 has_local=has_local,
                 card_linked=bool(yoto_card_id),
                 value=entry,
+                emoji=icon_factory.cached_emoji(icon_cache, episode_title),
             )
         )
 
