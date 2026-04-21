@@ -19,7 +19,6 @@ from typing import Any, Callable, Iterable
 
 import questionary
 from questionary import Choice, Separator
-from rich.align import Align
 from rich.console import Console
 from rich.panel import Panel
 from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeRemainingColumn
@@ -104,20 +103,10 @@ def pause(message: str = "Press Enter to continue…") -> None:
 # ---------------------------------------------------------------- display
 
 def banner() -> None:
-    """Title card. Replaces the old ASCII iPod logo."""
-    term_width = shutil.get_terminal_size().columns
-    title = Text()
-    title.append("  iPOD  ", style="bold black on yellow")
-    title.append("  ", style="")
-    title.append("Podcast → Yoto", style="bold cyan")
-    subtitle = Text("Download · Pixel-icon · Sync", style="dim cyan")
-    body = Align.center(
-        Text.assemble(title, "\n", subtitle),
-        vertical="middle",
-    )
-    CONSOLE.print(
-        Panel(body, border_style="yellow", padding=(1, 2), width=min(term_width, 70))
-    )
+    """Yoto-Mini ASCII logo with the iPod wordmark."""
+    from logo import render_logo
+
+    render_logo(CONSOLE)
 
 
 def rule(title: str = "") -> None:
