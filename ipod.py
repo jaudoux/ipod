@@ -22,7 +22,7 @@ def display_ipod_logo():
     subtitle = "\033[36m"  # Darker Cyan
     reset = "\033[0m"
 
-    logo = f"""
+    logo = rf"""
 {frame}          .----------.
 {frame}          | -------- |    {text_main}_____  _____   ____  _____  
 {frame}          | |  {screen_text}IPOD{frame}  |    {text_main}|_   _||  __ \ / __ \|  __ \ 

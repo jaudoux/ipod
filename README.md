@@ -79,8 +79,20 @@ Everything is driven by arrow keys, space (multi-select), and enter.
 
 ### Install
 
+One-liner (clones into `~/.local/share/ipod`, creates a venv, drops an `ipod`
+launcher into `~/.local/bin`):
+
 ```bash
-git clone git@github.com:jaudoux/ipod.git
+curl -fsSL https://raw.githubusercontent.com/jaudoux/ipod/main/install.sh | bash
+```
+
+Re-run the same command to update. Override locations with `IPOD_HOME=…` /
+`IPOD_BIN_DIR=…` / `IPOD_REF=…` env vars.
+
+Prefer to clone manually:
+
+```bash
+git clone https://github.com/jaudoux/ipod.git
 cd ipod
 python3 -m venv .venv
 source .venv/bin/activate
@@ -90,7 +102,8 @@ pip install -r requirements.txt
 ### First run
 
 ```bash
-python3 ipod.py
+ipod               # if installed via install.sh
+python3 ipod.py    # if cloned manually
 ```
 
 - On first use you'll be asked for your Yoto Client ID — paste the one from
