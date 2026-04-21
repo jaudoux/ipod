@@ -9,6 +9,9 @@ yoto_config.json
 # Generated Yoto icon library cache (regenerated on first run)
 yoto_public_icons.json
 
+# Generated Apple emoji metadata cache (regenerated on first run)
+emoji_apple.json
+
 # macOS / editor / Python cruft
 .DS_Store
 __pycache__/

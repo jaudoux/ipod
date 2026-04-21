@@ -43,6 +43,17 @@ YOTO_PUBLIC_ICONS_CACHE = os.path.join(
 # Wikimedia/Flickr/etc. We pick a PNG, pixel-quantize it, then upload.
 OPENVERSE_URL = "https://api.openverse.org/v1/images/"
 
+# Apple emoji (via emoji-datasource-apple on unpkg). These are designed to
+# read at small sizes, so they downsample to 16×16 much better than generic
+# web imagery. We pull the 64px Apple sheet variant and LANCZOS-shrink it.
+APPLE_EMOJI_META_URL = "https://unpkg.com/emoji-datasource-apple/emoji.json"
+APPLE_EMOJI_IMG_URL = (
+    "https://unpkg.com/emoji-datasource-apple/img/apple/64/{image}"
+)
+APPLE_EMOJI_CACHE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "emoji_apple.json"
+)
+
 # Local Ollama config. Override via env if the user runs a different model/host.
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/generate")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "llama3.1:latest")
@@ -61,6 +72,25 @@ _STOPWORDS = {
     "ton", "tout", "tous", "toute", "toutes", "tu", "un", "une",
     "vers", "vient", "vont", "voient", "servent", "vraiment", "vrai",
     "presente", "episode", "podcast",
+}
+
+# English fillers that must never be used as a visual keyword. Ollama
+# sometimes emits "the"/"of"/"story" and several Yoto icons carry these
+# as tag pollution, which would otherwise yield absurd matches like
+# "Le lapin de velours → The Dahl – Blue Kite (via 'the')".
+_EN_STOPWORDS = {
+    "the", "a", "an", "and", "or", "but", "of", "to", "in", "on", "at",
+    "by", "for", "with", "from", "as", "is", "are", "was", "were", "be",
+    "been", "being", "have", "has", "had", "do", "does", "did", "this",
+    "that", "these", "those", "it", "its", "their", "his", "her", "he",
+    "she", "they", "we", "our", "my", "your", "who", "what", "when",
+    "where", "why", "how", "all", "any", "some", "no", "not", "one",
+    "two", "three", "about", "into", "over", "under", "out", "up",
+    "down", "if", "than", "then", "so", "too", "very",
+    # generic narrative words with no distinctive visual
+    "episode", "podcast", "story", "stories", "tale", "tales",
+    "chapter", "part", "title", "name", "thing", "things", "world",
+    "place", "people", "person", "someone", "something", "anything",
 }
 
 # Compact FR→EN noun map — covers common kids-podcast themes
@@ -204,9 +234,19 @@ _OLLAMA_PROMPT = (
     "that sounds similar but means something different (e.g. French 'tatou' "
     "means 'armadillo', NOT 'tattoo'; 'orque' means 'orca', NOT 'orchestra'; "
     "'taon' means 'horsefly', NOT 'cricket').\n\n"
-    "Output 5 lowercase English single-word nouns that could stand in as a "
-    "visual icon, most specific first. Comma-separated, no explanations, no "
-    "numbering, no quotes.\n\n"
+    "Output 5 lowercase English CONCRETE VISUAL NOUNS (things you can draw "
+    "as a 16x16 pixel icon), most specific first. Comma-separated, no "
+    "explanations, no numbering, no quotes.\n\n"
+    "HARD RULES:\n"
+    "- NEVER output articles, pronouns, prepositions, or generic fillers: "
+    "no 'the', 'a', 'an', 'of', 'to', 'in', 'on', 'and', 'is', 'it', 'this', "
+    "'that', 'story', 'tale', 'episode', 'chapter', 'thing', 'world', "
+    "'people', 'someone', 'something', 'adventure', 'book' (unless the "
+    "episode is literally about books).\n"
+    "- Strip author names, series labels, 'd'après ...', 'inédit', and any "
+    "'- X, d'après Y' sub-clauses. Focus on the STORY SUBJECT.\n"
+    "- Proper nouns are fine only if iconic (e.g. 'aladdin' → 'lamp, genie').\n"
+    "- Prefer one dominant subject + 3-4 visually related nouns.\n\n"
     "Examples:\n"
     "Title: Les 5 sens : l'ouie\nKeywords: ear, hearing, sound, head, body\n"
     "Title: À quoi servent les arbres ?\nKeywords: tree, forest, leaf, nature, plant\n"
@@ -216,7 +256,12 @@ _OLLAMA_PROMPT = (
     "Title: Tatou\nKeywords: armadillo, shell, mammal, animal, ball\n"
     "Title: Hyène\nKeywords: hyena, predator, dog, mammal, animal\n"
     "Title: Le Taon\nKeywords: horsefly, fly, insect, bug, wing\n"
-    "Title: Orque\nKeywords: orca, whale, dolphin, fish, sea\n\n"
+    "Title: Orque\nKeywords: orca, whale, dolphin, fish, sea\n"
+    "Title: Olaf au pays du roi Hiver\nKeywords: snowflake, snowman, crown, winter, castle\n"
+    "Title: Conte-moi l'aventure ! - L'île mystérieuse, d'après le roman de Jules Verne\nKeywords: island, treasure, map, ship, palm\n"
+    "Title: Aladdin et la lampe merveilleuse\nKeywords: lamp, genie, magic, wish, carpet\n"
+    "Title: Le lapin de velours\nKeywords: rabbit, toy, bunny, heart, stuffed\n"
+    "Title: Le mariage de Skadi\nKeywords: viking, mountain, bride, norse, helmet\n\n"
     "Title: {title}\nKeywords:"
 )
 
@@ -256,8 +301,11 @@ def _sanitize_words(raw: str) -> list[str]:
     clean: list[str] = []
     for t in tokens:
         t = re.sub(r"[^a-z-]", "", t).strip("-")
-        if 2 <= len(t) <= 30 and t not in clean:
-            clean.append(t)
+        if len(t) < 3 or len(t) > 30:
+            continue
+        if t in _EN_STOPWORDS or t in clean:
+            continue
+        clean.append(t)
     return clean[:8]
 
 
@@ -298,9 +346,9 @@ def _tokenize(title: str) -> list[str]:
 def extract_keywords(title: str) -> list[str]:
     """Return ordered English keyword candidates for an episode title.
 
-    Priority: (1) local Ollama suggestion, (2) bundled FR→EN noun map,
-    (3) raw accent-stripped tokens. Every stage is optional — the worst case
-    is an empty list, which callers handle as a fallback to the default icon.
+    Priority: (1) literal title tokens that are themselves known visual
+    concepts (emoji short-names), (2) local Ollama suggestion, (3) bundled
+    FR→EN noun map, (4) raw accent-stripped tokens. Every stage is optional.
     """
     candidates: list[str] = []
     seen: set[str] = set()
@@ -310,10 +358,21 @@ def extract_keywords(title: str) -> list[str]:
             seen.add(word)
             candidates.append(word)
 
+    tokens = _tokenize(title)
+
+    # Promote raw title tokens that are direct emoji hits. Ollama tends to
+    # decompose short titles into parts ("skateboard" → wheel, board, truck,
+    # deck, grip), burying the literal subject. If the title already contains
+    # a concrete visual noun, it should outrank synonyms.
+    emoji_index = _load_emoji_index()
+    if emoji_index:
+        for tok in tokens:
+            if tok in emoji_index:
+                add(tok)
+
     for kw in _ollama_keywords(title):
         add(kw)
 
-    tokens = _tokenize(title)
     for tok in tokens:
         add(_FR_EN.get(tok))
     for tok in tokens:
@@ -403,12 +462,31 @@ _LICENSED_PREFIXES = (
     "pokemon",
     "ben 10",
     "octonauts",
+    # Roald Dahl series — titles like "Dahl - Blue Kite" use this prefix.
+    "dahl",
+    "roald dahl",
+    # Other series spotted in Yoto's library that behave like franchise art.
+    "julia donaldson",
+    "beatrix potter",
+    "gruffalo",
+    "stick man",
+    "hairy maclary",
 )
+
+
+# Franchise/brand tokens that flag a title as licensed even mid-string.
+_LICENSED_TOKENS = {
+    "dahl", "gruffalo", "peppa", "pokemon", "disney", "octonauts",
+    "brainbots", "donaldson", "potter",
+}
 
 
 def _is_licensed(title: str) -> bool:
     t = (title or "").lower().strip()
-    return any(t.startswith(p) for p in _LICENSED_PREFIXES)
+    if any(t.startswith(p) for p in _LICENSED_PREFIXES):
+        return True
+    words = set(re.split(r"[^a-z]+", t))
+    return bool(words & _LICENSED_TOKENS)
 
 
 def _score_icon_for_keywords(icon: dict, keywords: list[str]) -> tuple[int, str | None]:
@@ -416,22 +494,34 @@ def _score_icon_for_keywords(icon: dict, keywords: list[str]) -> tuple[int, str 
     keyword list. Earlier (more specific) keywords score higher.
     """
     title = icon.get("title") or ""
-    title_words = set(title.lower().split())
+    # Strip punctuation so "Cat, animal" tokenizes to {'cat', 'animal'},
+    # not {'cat,', 'animal'} — otherwise title-word matches get missed.
+    title_words = {w for w in re.split(r"[^a-z0-9-]+", title.lower()) if w}
     tags = set(t.lower() for t in (icon.get("publicTags") or []))
+
+    # Ignore filler words on the icon side too: several Yoto icons are tagged
+    # with articles like 'the'/'of' (book titles), which would otherwise let
+    # any stray keyword match them. Only *content* tokens count as evidence.
+    meaningful_tags = tags - _EN_STOPWORDS
+    meaningful_title_words = {w for w in title_words if w not in _EN_STOPWORDS}
 
     best_score = 0
     best_kw = None
+    matched_kws: set[str] = set()
     for rank, kw in enumerate(keywords):
-        variants = _keyword_variants(kw)
+        if kw in _EN_STOPWORDS:
+            continue
+        variants = _keyword_variants(kw) - _EN_STOPWORDS
         if not variants:
             continue
-        if variants & tags:
+        if variants & meaningful_tags:
             base = 30
-        elif variants & title_words:
+        elif variants & meaningful_title_words:
             base = 20
         else:
             continue
 
+        matched_kws.add(kw)
         score = base
         # Rank bonus: specific synonyms (rank 0-1) beat generic ones (rank 4+).
         score -= rank * 2
@@ -441,6 +531,12 @@ def _score_icon_for_keywords(icon: dict, keywords: list[str]) -> tuple[int, str 
         # Penalize show-licensed content heavily.
         if _is_licensed(title):
             score -= 25
+        # Empty/symbol-only titles carry no visual identity we can verify
+        # from the log — only accept them when the tag evidence is strong
+        # (≥2 meaningful tag hits), else downrank.
+        if not meaningful_title_words:
+            if len(variants & meaningful_tags) < 2:
+                score -= 10
         # Prefer short, focused titles.
         score -= len(title_words)
         # Prefer fewer tags (more generic icons).
@@ -449,6 +545,19 @@ def _score_icon_for_keywords(icon: dict, keywords: list[str]) -> tuple[int, str 
         if score > best_score:
             best_score = score
             best_kw = kw
+
+    # Title-word coverage bonus: reward icons whose own title words literally
+    # ARE our keywords (or their variants). "Tennis Ball" with title words
+    # {tennis, ball} both in keywords is semantically nailed on; "Rugby" /
+    # "Mushroom" titled with words NOT in keywords are loose tag matches.
+    # This is a stronger specificity signal than raw multi-keyword coverage,
+    # which over-rewards icons with many atmospheric tags (nature/forest).
+    if meaningful_title_words and best_kw is not None:
+        keyword_variants_all: set[str] = set()
+        for kw in matched_kws:
+            keyword_variants_all |= _keyword_variants(kw)
+        covered = meaningful_title_words & keyword_variants_all
+        best_score += 2 * len(covered)
 
     return best_score, best_kw
 
@@ -463,7 +572,7 @@ def _match_yoto_icon(keywords: list[str] | str) -> tuple[dict, str] | None:
         return None
     if isinstance(keywords, str):
         keywords = [keywords]
-    keywords = [k for k in keywords if k]
+    keywords = [k for k in keywords if k and k not in _EN_STOPWORDS]
     if not keywords:
         return None
 
@@ -480,6 +589,206 @@ def _match_yoto_icon(keywords: list[str] | str) -> tuple[dict, str] | None:
     if best is None:
         return None
     return best, best_kw or keywords[0]
+
+
+def _best_icon_candidate(keywords: list[str]):
+    """Score Yoto icons AND Apple emoji in one pass, return the top-scoring.
+
+    Returns a tuple (kind, payload, matched_kw, score) where:
+      - kind='yoto',  payload=icon dict from Yoto's public library
+      - kind='emoji', payload=emoji image filename (e.g. '1f430.png')
+    Returns None if no candidate crosses the threshold.
+
+    Emoji get the same base score as a Yoto tag hit (30), so the two
+    sources compete on equal footing. The usual rank/pixel/license bonuses
+    still apply on the Yoto side; emoji only pay a rank penalty. Ties go
+    to Yoto (it enumerates first) — that's fine since a clean Yoto native
+    pixel icon is strictly better than a downsampled emoji when both are
+    equally specific.
+    """
+    keywords = [k for k in keywords if k and k not in _EN_STOPWORDS]
+    if not keywords:
+        return None
+
+    best = None  # (score, kind, payload, matched_kw)
+
+    for icon in _load_yoto_public_icons():
+        score, kw = _score_icon_for_keywords(icon, keywords)
+        if score > 0 and (best is None or score > best[0]):
+            best = (score, "yoto", icon, kw)
+
+    emoji_index = _load_emoji_index()
+    if emoji_index:
+        for rank, kw in enumerate(keywords):
+            for variant in _keyword_variants(kw):
+                if variant in _EN_STOPWORDS:
+                    continue
+                image = emoji_index.get(variant)
+                if not image:
+                    continue
+                # Emoji short_names are hand-curated and 1-to-1 with the
+                # concept, so a later-ranked match is still gold. Use a
+                # softer rank penalty (×1) than Yoto (×2). Base 30 still
+                # mirrors a Yoto tag hit so rank-0 parity holds.
+                score = 30 - rank
+                if best is None or score > best[0]:
+                    best = (score, "emoji", image, kw)
+                break  # first matching variant for this keyword is enough
+
+    if best is None:
+        return None
+    score, kind, payload, kw = best
+    return kind, payload, kw, score
+
+
+_emoji_index: dict[str, str] | None = None
+
+
+def _load_emoji_index() -> dict[str, str]:
+    """Return keyword → Apple-emoji image filename (e.g. '1f430.png').
+
+    Skips skin-tone-modified variants and ZWJ families — their short_names
+    rarely match kids-podcast keywords and we don't want, say, a keyword
+    'family' to resolve to a specific family-composition emoji.
+    """
+    global _emoji_index
+    if _emoji_index is not None:
+        return _emoji_index
+
+    data = None
+    if os.path.exists(APPLE_EMOJI_CACHE):
+        try:
+            with open(APPLE_EMOJI_CACHE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    if data is None:
+        try:
+            r = requests.get(APPLE_EMOJI_META_URL, timeout=15)
+            if r.status_code != 200:
+                _emoji_index = {}
+                return _emoji_index
+            data = r.json()
+            try:
+                with open(APPLE_EMOJI_CACHE, "w", encoding="utf-8") as f:
+                    json.dump(data, f)
+                tui.status("info", f"Cached {len(data)} Apple emoji entries.")
+            except OSError:
+                pass
+        except (requests.RequestException, ValueError):
+            _emoji_index = {}
+            return _emoji_index
+
+    # Skin-tone modifiers (1F3FB–1F3FF) appear as hyphen-joined segments.
+    skin_tones = {"1f3fb", "1f3fc", "1f3fd", "1f3fe", "1f3ff"}
+
+    def _is_flag(parts: list[str]) -> bool:
+        # Regional indicator symbols (1F1E6–1F1FF) form country flags.
+        if len(parts) != 2:
+            return False
+        return all(
+            p.startswith("1f1") and "e6" <= p[3:] <= "ff" for p in parts
+        )
+
+    index: dict[str, str] = {}
+    for entry in data:
+        if not entry.get("has_img_apple"):
+            continue
+        image = entry.get("image")
+        unified = (entry.get("unified") or "").lower()
+        if not image or not unified:
+            continue
+        parts = unified.split("-")
+        if any(p in skin_tones for p in parts):
+            continue
+        if len(parts) > 2 or _is_flag(parts):
+            continue
+
+        # Only use curated short names. Tokenizing the free-form `name`
+        # leaks bad matches: e.g. 'EAR OF CORN' contributes 'ear' (body
+        # part keyword hits a corn emoji), and 'ASCENSION ISLAND' makes a
+        # flag steal the 'island' keyword.
+        names: set[str] = set()
+        if entry.get("short_name"):
+            names.add(entry["short_name"])
+        names.update(entry.get("short_names") or [])
+        for n in names:
+            n = n.lower().replace("_", "-")
+            if n and n not in _EN_STOPWORDS and n not in index:
+                index[n] = image
+    _emoji_index = index
+    return _emoji_index
+
+
+def _emoji_to_16x16_png(image_bytes: bytes) -> str | None:
+    """Downsample an Apple emoji PNG to a 16×16 RGBA PNG, preserving alpha.
+
+    Apple emoji are already centered and square, so we can skip the crop/
+    quantize steps from `_pixelize_to_tempfile` and get a cleaner result
+    with a single LANCZOS pass.
+    """
+    if not _HAS_PIL:
+        return None
+    try:
+        img = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
+        img = img.resize((16, 16), Image.LANCZOS)
+        temp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+        img.save(temp.name, format="PNG")
+        temp.close()
+        return temp.name
+    except Exception as e:
+        tui.status("warn", f"Emoji pixelize failed: {e}")
+        return None
+
+
+def _find_emoji_for_keyword(keyword: str) -> str | None:
+    """Return the image filename of an Apple emoji matching keyword, else None."""
+    index = _load_emoji_index()
+    if not index:
+        return None
+    for variant in _keyword_variants(keyword):
+        if variant in _EN_STOPWORDS:
+            continue
+        image = index.get(variant)
+        if image:
+            return image
+    return None
+
+
+def _upload_emoji_image(image_name: str) -> str | None:
+    """Fetch a specific Apple emoji PNG, pixelize, upload. Returns icon_ref."""
+    if not _HAS_PIL:
+        return None
+    try:
+        r = requests.get(APPLE_EMOJI_IMG_URL.format(image=image_name), timeout=10)
+    except requests.RequestException:
+        return None
+    if r.status_code != 200 or not r.content:
+        return None
+
+    temp_path = _emoji_to_16x16_png(r.content)
+    if not temp_path:
+        return None
+
+    try:
+        result = yoto_api.upload_custom_icon(
+            file_path=temp_path,
+            filename=f"emoji_{image_name}",
+            auto_convert=True,
+        )
+    finally:
+        try:
+            os.unlink(temp_path)
+        except OSError:
+            pass
+
+    if not result:
+        return None
+    media_id = result.get("mediaId")
+    if not media_id:
+        return None
+    return f"yoto:#{media_id}"
 
 
 def _fetch_openverse_image(keyword: str) -> tuple[bytes, str] | None:
@@ -617,43 +926,127 @@ def save_cache(podcast_dir: str | None, cache: dict) -> None:
         tui.status("warn", f"Could not save icon cache: {e}")
 
 
+_LEADING_PARTICLES_RE = re.compile(
+    r"^(?:"
+    r"[-:–—·|]+\s*"           # leading dash / colon / bullet
+    r"|d['’]\s*"               # d' / d’
+    r"|de\s+(?:la\s+|l['’]\s*|les\s+|l\s*)?"
+    r"|du\s+|des\s+"
+    r"|le\s+|la\s+|les\s+|l['’]\s*"
+    r")+",
+    flags=re.IGNORECASE,
+)
+
+
+def _normalize_word(w: str) -> str:
+    """Lowercase + strip trailing punctuation for prefix comparison."""
+    return w.lower().rstrip(",.!?:;'\"’)]}")
+
+
+def detect_series_prefixes(titles: list[str]) -> dict[str, str]:
+    """Map each title to its post-prefix remainder when ≥2 episodes share a
+    ≥2-word prefix. Titles with no shared prefix are absent from the result.
+
+    Recurring podcast series repeat the show name in every episode title
+    (e.g. "La Discomobile de X"). That prefix dominates keyword extraction
+    across the whole playlist, so every episode gets the same icon. Stripping
+    it forces the matcher to look at the episode-specific remainder.
+    """
+    if len(titles) < 2:
+        return {}
+
+    tokenized: list[tuple[str, list[str]]] = []
+    for t in titles:
+        if not t:
+            continue
+        words = t.split()
+        if words:
+            tokenized.append((t, words))
+    if len(tokenized) < 2:
+        return {}
+
+    # Count how many titles share each normalized word-prefix of length ≥2.
+    prefix_counts: dict[tuple, int] = {}
+    for _, words in tokenized:
+        for n in range(2, len(words) + 1):
+            key = tuple(_normalize_word(w) for w in words[:n])
+            prefix_counts[key] = prefix_counts.get(key, 0) + 1
+
+    result: dict[str, str] = {}
+    for original, words in tokenized:
+        # Longest prefix, ≥2 words, ≥2 titles share it, leaves ≥1 word behind.
+        best_n = 0
+        for n in range(2, len(words)):
+            key = tuple(_normalize_word(w) for w in words[:n])
+            if prefix_counts.get(key, 0) >= 2:
+                best_n = n
+        if best_n == 0:
+            continue
+        remainder = " ".join(words[best_n:])
+        remainder = _LEADING_PARTICLES_RE.sub("", remainder).strip()
+        if remainder and remainder != original:
+            result[original] = remainder
+    return result
+
+
 def generate_icon_ref(
     title: str,
     cache: dict | None = None,
     *,
     force: bool = False,
+    keyword_source: str | None = None,
 ) -> str | None:
     """Full pipeline: title → Iconify match → Yoto upload → `yoto:#{mediaId}`.
 
     Returns None if no keyword mapped, no icon found, or upload failed.
     Mutates `cache` in place (title → icon_ref). When `force` is True the
     cached entry for this title is ignored and overwritten.
+
+    `keyword_source` lets callers pass a different string for keyword
+    extraction while still keying the cache and log output on the real
+    `title` — used by `backfill_playlist_icons` to strip recurring series
+    prefixes without losing cache stability.
     """
     if cache is None:
         cache = {}
     if not force and title in cache:
         return cache[title]
 
-    keywords = extract_keywords(title)
+    keywords = extract_keywords(keyword_source if keyword_source else title)
     if not keywords:
         tui.status("warn", f"No keywords extracted from: {title!r}")
         return None
 
-    # First pass: prefer native Yoto pixel icons (no upload, native 16x16).
-    # Score all keywords globally so specific synonyms can still beat a weak
-    # match on an earlier, more generic keyword.
-    match = _match_yoto_icon(keywords)
-    if match:
-        icon, matched_kw = match
-        icon_ref = f"yoto:#{icon['mediaId']}"
-        cache[title] = icon_ref
-        tui.CONSOLE.print(
-            f"  [green]●[/] {title} [dim]→[/] Yoto «{icon.get('title') or '?'}» "
-            f"[dim](via {matched_kw!r})[/]"
-        )
-        return icon_ref
+    # Unified pass: Yoto native icons AND Apple emoji compete on the same
+    # score. Whichever has the more specific semantic match wins.
+    candidate = _best_icon_candidate(keywords)
+    if candidate:
+        kind, payload, matched_kw, _score = candidate
+        if kind == "yoto":
+            icon = payload
+            icon_ref = f"yoto:#{icon['mediaId']}"
+            cache[title] = icon_ref
+            label = icon.get("title") or ""
+            if not label.strip():
+                tag_sample = ", ".join((icon.get("publicTags") or [])[:3])
+                label = f"[{tag_sample}]" if tag_sample else "?"
+            tui.CONSOLE.print(
+                f"  [green]●[/] {title} [dim]→[/] Yoto «{label}» "
+                f"[dim](via {matched_kw!r})[/]"
+            )
+            return icon_ref
+        # kind == "emoji"
+        icon_ref = _upload_emoji_image(payload)
+        if icon_ref:
+            cache[title] = icon_ref
+            tui.CONSOLE.print(
+                f"  [green]●[/] {title} [dim]→[/] Apple emoji «{payload}» "
+                f"[dim](via {matched_kw!r})[/]"
+            )
+            return icon_ref
+        # emoji upload failed — fall through to Openverse/Iconify
 
-    # Second pass: pull a CC-licensed PNG from Openverse and pixelate it.
+    # Fallback: pull a CC-licensed PNG from Openverse and pixelate it.
     for keyword in keywords:
         web = _upload_web_icon(keyword)
         if web:
@@ -755,6 +1148,18 @@ def backfill_playlist_icons(
         f"Scanning {len(chapters)} chapter(s) in playlist {playlist_id} ({mode})…",
     )
 
+    all_titles = [(c.get("title") or "").strip() for c in chapters]
+    series_prefixes = detect_series_prefixes(all_titles)
+    if series_prefixes:
+        # Show a sample so the user sees what's being stripped.
+        sample_orig = next(iter(series_prefixes))
+        sample_strip = series_prefixes[sample_orig]
+        tui.status(
+            "info",
+            f"Series prefix detected — stripping for {len(series_prefixes)} "
+            f"chapter(s). e.g. {sample_orig!r} → {sample_strip!r}",
+        )
+
     for i, chapter in enumerate(chapters, 1):
         title = (chapter.get("title") or "").strip()
         display = chapter.get("display") or {}
@@ -771,7 +1176,10 @@ def backfill_playlist_icons(
             continue
 
         tui.CONSOLE.print(f"  [cyan][{i}/{len(chapters)}][/] generating for [bold]{title}[/]…")
-        icon_ref = generate_icon_ref(title, cache, force=force)
+        keyword_source = series_prefixes.get(title)
+        icon_ref = generate_icon_ref(
+            title, cache, force=force, keyword_source=keyword_source
+        )
         if not icon_ref:
             stats["failed"] += 1
             continue
